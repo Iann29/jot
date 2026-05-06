@@ -1,0 +1,213 @@
+/* Jot — floating notes for Wayland */
+
+window.jot-window {
+    background-color: alpha(#0f1014, var(--jot-opacity, 0.94));
+    color: #e6e6ea;
+    border-radius: 16px;
+}
+
+/* Layered: when transparency is on, kill the deep shadows so glass effect reads */
+window.jot-window > contents {
+    background: transparent;
+}
+
+.jot-headerbar {
+    background: linear-gradient(180deg,
+        alpha(#1a1c22, 0.55),
+        alpha(#0f1014, 0.0));
+    border: 0;
+    box-shadow: none;
+    min-height: 42px;
+    padding: 0 6px;
+}
+
+.jot-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #e6e6ea;
+    letter-spacing: 0.3px;
+}
+
+.jot-subtitle {
+    font-size: 10px;
+    color: alpha(#e6e6ea, 0.5);
+    font-feature-settings: "tnum";
+}
+
+/* Sidebar */
+.jot-sidebar {
+    background: alpha(#0a0b0e, 0.45);
+    border-right: 1px solid alpha(#ffffff, 0.05);
+    min-width: 220px;
+}
+
+.jot-sidebar-header {
+    padding: 8px 10px 4px 10px;
+}
+
+.jot-search {
+    background: alpha(#ffffff, 0.04);
+    border: 1px solid alpha(#ffffff, 0.06);
+    border-radius: 8px;
+    color: #e6e6ea;
+    padding: 4px 8px;
+    margin: 4px 8px 8px 8px;
+    min-height: 28px;
+}
+.jot-search:focus-within {
+    border-color: alpha(#7c8cff, 0.6);
+    background: alpha(#ffffff, 0.06);
+}
+
+.jot-list {
+    background: transparent;
+    padding: 4px 6px 8px 6px;
+}
+
+.jot-list > row {
+    background: transparent;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 2px 0;
+    transition: background 120ms ease;
+}
+.jot-list > row:hover {
+    background: alpha(#ffffff, 0.04);
+}
+.jot-list > row:selected {
+    background: alpha(#7c8cff, 0.18);
+    color: #ffffff;
+}
+.jot-list > row:selected .jot-row-snippet {
+    color: alpha(#ffffff, 0.7);
+}
+
+.jot-row-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #e6e6ea;
+}
+.jot-row-snippet {
+    font-size: 11px;
+    color: alpha(#e6e6ea, 0.55);
+    margin-top: 2px;
+}
+.jot-row-time {
+    font-size: 10px;
+    color: alpha(#e6e6ea, 0.4);
+    font-feature-settings: "tnum";
+    margin-top: 4px;
+}
+
+/* Editor area */
+.jot-editor-shell {
+    background: transparent;
+}
+
+.jot-editor {
+    background: transparent;
+    color: #e6e6ea;
+    caret-color: #7c8cff;
+    padding: 18px 22px;
+    font-family: "JetBrains Mono", "Inter", "Fira Code", monospace;
+}
+
+.jot-editor text {
+    background: transparent;
+    color: #e6e6ea;
+}
+.jot-editor text selection {
+    background: alpha(#7c8cff, 0.35);
+    color: #ffffff;
+}
+
+.jot-placeholder {
+    color: alpha(#e6e6ea, 0.4);
+    font-size: 14px;
+    font-style: italic;
+}
+
+/* Buttons */
+.jot-headerbar button {
+    background: alpha(#ffffff, 0.04);
+    border: 1px solid alpha(#ffffff, 0.06);
+    border-radius: 8px;
+    color: #e6e6ea;
+    padding: 4px 8px;
+    min-height: 28px;
+    min-width: 28px;
+}
+.jot-headerbar button:hover {
+    background: alpha(#ffffff, 0.08);
+    border-color: alpha(#ffffff, 0.1);
+}
+.jot-headerbar button:active {
+    background: alpha(#ffffff, 0.12);
+}
+
+.jot-accent {
+    background: linear-gradient(180deg, #8a99ff, #6a7af0);
+    color: #0a0b0e;
+    border: 0;
+    font-weight: 600;
+}
+.jot-accent:hover {
+    background: linear-gradient(180deg, #9aa9ff, #7a8aff);
+}
+
+/* Settings popover */
+.jot-settings {
+    padding: 14px;
+    min-width: 260px;
+}
+.jot-settings label {
+    color: alpha(#e6e6ea, 0.7);
+    font-size: 12px;
+}
+.jot-settings scale {
+    margin-top: 4px;
+}
+.jot-settings scale trough {
+    background: alpha(#ffffff, 0.08);
+    border-radius: 4px;
+    min-height: 4px;
+}
+.jot-settings scale highlight {
+    background: linear-gradient(90deg, #6a7af0, #8a99ff);
+    border-radius: 4px;
+}
+.jot-settings scale slider {
+    background: #ffffff;
+    border: 0;
+    box-shadow: 0 2px 6px alpha(black, 0.3);
+    min-height: 14px;
+    min-width: 14px;
+    border-radius: 8px;
+    margin: -5px 0;
+}
+
+.jot-empty {
+    color: alpha(#e6e6ea, 0.5);
+    font-size: 14px;
+}
+
+.jot-image-line {
+    color: #7c8cff;
+    font-style: italic;
+}
+
+/* Scrollbars subtle */
+scrollbar {
+    background: transparent;
+    border: 0;
+}
+scrollbar slider {
+    background: alpha(#ffffff, 0.15);
+    border-radius: 6px;
+    min-width: 4px;
+    min-height: 4px;
+    margin: 2px;
+}
+scrollbar slider:hover {
+    background: alpha(#ffffff, 0.25);
+}

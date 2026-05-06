@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Jot
+GenericName=Floating Notes
+Comment=Lightning-fast floating notes for Wayland
+Exec=jot
+Icon=jot
+Terminal=false
+Categories=Utility;TextEditor;Office;
+StartupWMClass=com.amageweb.Jot
+StartupNotify=true
+Keywords=notes;note;jot;writing;memo;notepad;clipboard;
