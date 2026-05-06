@@ -9,7 +9,7 @@ use gtk::{gdk, gio};
 
 use crate::config::Config;
 use crate::db::{images_dir, Db};
-use crate::magnifier::MagnifierLens;
+use crate::image_canvas::ImageCanvas;
 use crate::maintenance;
 use crate::note::Note;
 
@@ -955,61 +955,77 @@ impl JotWindow {
     }
 
     fn show_image_preview(self: &Rc<Self>, texture: &gdk::Texture) {
-        const LENS_RADIUS: f32 = 110.0;
-        const LENS_DIAM: i32 = (LENS_RADIUS as i32) * 2;
-        const ZOOM: f32 = 2.0;
-
         let dialog = adw::Dialog::builder()
-            .content_width(960)
-            .content_height(720)
+            .content_width(1000)
+            .content_height(760)
             .can_close(true)
             .title("")
             .build();
         dialog.add_css_class("jot-image-preview");
 
-        let main_pic = gtk::Picture::for_paintable(texture);
-        main_pic.set_can_shrink(true);
-        main_pic.set_content_fit(gtk::ContentFit::Contain);
-        main_pic.set_vexpand(true);
-        main_pic.set_hexpand(true);
-        main_pic.add_css_class("jot-preview-image");
+        let canvas = ImageCanvas::new(texture);
+        canvas.add_css_class("jot-canvas");
 
-        // Custom-snapshot lens — translates+scales the texture inside a
-        // circular clip. Far simpler and less fragile than driving a
-        // Viewport with adjustments and a 2× sized inner Picture.
-        let lens = MagnifierLens::new(texture, LENS_RADIUS, ZOOM);
-        lens.add_css_class("jot-lens");
-        lens.set_halign(gtk::Align::Start);
-        lens.set_valign(gtk::Align::Start);
-        lens.set_visible(false);
-
-        let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&main_pic));
-        overlay.add_overlay(&lens);
-
-        // Motion driver — recompute lens focus point + position on every move.
-        let motion = gtk::EventControllerMotion::new();
-        let main_clone = main_pic.clone();
-        let lens_clone = lens.clone();
-        let tex_w = texture.width() as f64;
-        let tex_h = texture.height() as f64;
-        motion.connect_motion(move |_, x, y| {
-            update_lens(&main_clone, &lens_clone, tex_w, tex_h, LENS_DIAM, x, y);
-        });
-        let lens_for_leave = lens.clone();
-        motion.connect_leave(move |_| {
-            lens_for_leave.set_visible(false);
-        });
-        main_pic.add_controller(motion);
-
-        let header = adw::HeaderBar::builder()
-            .title_widget(&gtk::Label::builder().label("Image preview").build())
-            .build();
+        // Header bar with zoom controls. Zoom buttons drive the same
+        // `zoom_by` math as the scroll wheel, so they stay anchored at the
+        // pointer's current position too.
+        let title = gtk::Label::builder().label("Image preview").build();
+        let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.add_css_class("jot-headerbar");
+
+        let zoom_out_btn = gtk::Button::builder()
+            .icon_name("zoom-out-symbolic")
+            .tooltip_text("Zoom out  ·  Ctrl + scroll down")
+            .build();
+        let zoom_label = gtk::Label::builder()
+            .label(&format!("{:.0}%", canvas.zoom_pct()))
+            .width_chars(5)
+            .build();
+        zoom_label.add_css_class("jot-row-time");
+        let zoom_in_btn = gtk::Button::builder()
+            .icon_name("zoom-in-symbolic")
+            .tooltip_text("Zoom in  ·  Ctrl + scroll up")
+            .build();
+        let reset_btn = gtk::Button::builder()
+            .icon_name("zoom-fit-best-symbolic")
+            .tooltip_text("Reset view  ·  double-click")
+            .build();
+
+        let canvas_for_btn = canvas.clone();
+        let lbl = zoom_label.clone();
+        zoom_in_btn.connect_clicked(move |_| {
+            canvas_for_btn.zoom_in();
+            lbl.set_label(&format!("{:.0}%", canvas_for_btn.zoom_pct()));
+        });
+        let canvas_for_btn = canvas.clone();
+        let lbl = zoom_label.clone();
+        zoom_out_btn.connect_clicked(move |_| {
+            canvas_for_btn.zoom_out();
+            lbl.set_label(&format!("{:.0}%", canvas_for_btn.zoom_pct()));
+        });
+        let canvas_for_btn = canvas.clone();
+        let lbl = zoom_label.clone();
+        reset_btn.connect_clicked(move |_| {
+            canvas_for_btn.reset_view();
+            lbl.set_label(&format!("{:.0}%", canvas_for_btn.zoom_pct()));
+        });
+
+        // Keep the % label in sync with scroll-wheel zooms too.
+        let lbl = zoom_label.clone();
+        let canvas_for_tick = canvas.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+            lbl.set_label(&format!("{:.0}%", canvas_for_tick.zoom_pct()));
+            glib::ControlFlow::Continue
+        });
+
+        header.pack_start(&zoom_out_btn);
+        header.pack_start(&zoom_label);
+        header.pack_start(&zoom_in_btn);
+        header.pack_end(&reset_btn);
 
         let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
         bx.append(&header);
-        bx.append(&overlay);
+        bx.append(&canvas);
 
         dialog.set_child(Some(&bx));
         dialog.present(Some(&self.window));
@@ -1332,54 +1348,6 @@ fn is_url_char(c: char) -> bool {
 
 fn is_trailing_punct(c: char) -> bool {
     matches!(c, '.' | ',' | ';' | ':' | '!' | '?')
-}
-
-fn update_lens(
-    main_pic: &gtk::Picture,
-    lens: &MagnifierLens,
-    tex_w: f64,
-    tex_h: f64,
-    lens_size: i32,
-    px: f64,
-    py: f64,
-) {
-    let widget_w = main_pic.width() as f64;
-    let widget_h = main_pic.height() as f64;
-    if widget_w <= 0.0 || widget_h <= 0.0 || tex_w <= 0.0 || tex_h <= 0.0 {
-        lens.set_visible(false);
-        return;
-    }
-
-    // Reproduce ContentFit::Contain layout: picture is centred + scaled
-    // uniformly to fit the widget. Anything outside the drawn region is
-    // bare background.
-    let scale = (widget_w / tex_w).min(widget_h / tex_h);
-    let drawn_w = tex_w * scale;
-    let drawn_h = tex_h * scale;
-    let off_x = (widget_w - drawn_w) / 2.0;
-    let off_y = (widget_h - drawn_h) / 2.0;
-
-    if px < off_x || px > off_x + drawn_w || py < off_y || py > off_y + drawn_h {
-        lens.set_visible(false);
-        return;
-    }
-    lens.set_visible(true);
-
-    // Cursor in source-texture coordinates.
-    let img_x = (px - off_x) / scale;
-    let img_y = (py - off_y) / scale;
-    lens.set_focus(img_x as f32, img_y as f32);
-
-    // Position the lens centred on the cursor, clamped inside the overlay
-    // so the disc never escapes the dialog.
-    let lens_size_f = lens_size as f64;
-    let half = lens_size_f / 2.0;
-    let max_x = (widget_w - lens_size_f).max(0.0);
-    let max_y = (widget_h - lens_size_f).max(0.0);
-    let lens_x = (px - half).clamp(0.0, max_x);
-    let lens_y = (py - half).clamp(0.0, max_y);
-    lens.set_margin_start(lens_x as i32);
-    lens.set_margin_top(lens_y as i32);
 }
 
 fn scale_to_fit(tex_w: i32, tex_h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
