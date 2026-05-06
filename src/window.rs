@@ -1262,24 +1262,33 @@ impl JotWindow {
     }
 
     fn refresh_link_cursor(&self) {
-        let over_url = match self.pointer_pos.get() {
-            Some((x, y)) => self.is_pointer_over_url(x, y),
-            None => false,
-        };
-        let name = if self.ctrl_held.get() && over_url {
-            "pointer"
-        } else {
-            "text"
-        };
+        // Skip the iter-at-location query entirely when Ctrl isn't held.
+        // It only matters for the "pointer" cursor decision, and the GTK
+        // call has triggered crashes with certain buffer states (mix of
+        // visible/invisible runs around child anchors). Limiting it to
+        // the moments we actually care about both avoids the crash and
+        // saves a query on every mouse move.
+        let want_pointer = self.ctrl_held.get()
+            && match self.pointer_pos.get() {
+                Some((x, y)) => self.is_pointer_over_url(x, y),
+                None => false,
+            };
+        let name = if want_pointer { "pointer" } else { "text" };
         self.text_view.set_cursor_from_name(Some(name));
     }
 
     fn is_pointer_over_url(&self, x: f64, y: f64) -> bool {
+        if self.buffer.char_count() == 0 {
+            return false;
+        }
         let (bx, by) = self.text_view.window_to_buffer_coords(
             gtk::TextWindowType::Widget,
             x as i32,
             y as i32,
         );
+        if bx < 0 || by < 0 {
+            return false;
+        }
         match self.text_view.iter_at_location(bx, by) {
             Some(iter) => iter.has_tag(&self.url_tag),
             None => false,
