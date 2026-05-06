@@ -4,6 +4,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
+use crate::maintenance;
 use crate::window::JotWindow;
 
 pub const APP_ID: &str = "com.amageweb.Jot";
@@ -17,6 +18,11 @@ pub fn run() -> glib::ExitCode {
 
     app.connect_startup(|_| {
         load_css();
+        // Take the daily snapshot before anything writes to the DB so the
+        // backup reflects the state we just opened with.
+        if let Err(e) = maintenance::ensure_daily_backup() {
+            tracing::warn!("daily backup skipped: {e}");
+        }
     });
 
     let window: Rc<RefCell<Option<Rc<JotWindow>>>> = Rc::new(RefCell::new(None));

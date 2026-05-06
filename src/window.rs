@@ -9,6 +9,7 @@ use gtk::{gdk, gio};
 
 use crate::config::Config;
 use crate::db::{images_dir, Db};
+use crate::maintenance;
 use crate::note::Note;
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
@@ -255,6 +256,16 @@ impl JotWindow {
             win.save_pending();
             let _ = win.state.borrow().config.save();
             glib::Propagation::Proceed
+        });
+
+        // Sweep orphan images once the UI has settled. `idle_add_local_once`
+        // fires when GTK has nothing higher-priority to do, so startup feel
+        // stays instant even if the images dir is large.
+        let db_for_vacuum = this.db.clone();
+        glib::idle_add_local_once(move || {
+            if let Err(e) = maintenance::vacuum_orphan_images(&db_for_vacuum) {
+                tracing::warn!("image vacuum failed: {e}");
+            }
         });
 
         this
