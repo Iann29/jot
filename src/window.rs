@@ -854,9 +854,11 @@ impl JotWindow {
         let (w, h) = scale_to_fit(texture.width(), texture.height(), IMAGE_MAX_W, IMAGE_MAX_H);
         let picture = gtk::Picture::for_paintable(texture);
         picture.add_css_class("jot-inline-image");
-        picture.set_can_shrink(false);
+        picture.set_can_shrink(true);
         picture.set_content_fit(gtk::ContentFit::Contain);
         picture.set_size_request(w, h);
+        picture.set_halign(gtk::Align::Start);
+        picture.set_valign(gtk::Align::Start);
         self.text_view.add_child_at_anchor(&picture, &anchor);
 
         // 2. Invisible markdown reference (so the body round-trips). After
