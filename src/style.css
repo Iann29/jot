@@ -216,6 +216,18 @@ window.jot-window > contents {
     padding: 12px;
 }
 
+/* Magnifier lens that follows the cursor inside the preview dialog */
+.jot-lens {
+    border-radius: 999px;
+    border: 2px solid alpha(#ffffff, 0.5);
+    box-shadow: 0 6px 28px alpha(#000000, 0.7),
+                inset 0 0 0 1px alpha(#000000, 0.4);
+    background: #000;
+}
+.jot-lens viewport {
+    background: transparent;
+}
+
 /* Pin star in note rows */
 .jot-pin-btn {
     background: transparent;
