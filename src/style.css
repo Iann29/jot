@@ -212,6 +212,14 @@ window.jot-window > contents {
     background: alpha(#0a0b0e, 0.96);
 }
 
+/* Preview dialog's header is solid (not the translucent variant used in
+   the main window) so it always reads above the canvas content. */
+.jot-image-preview .jot-headerbar {
+    background: #14161c;
+    border-bottom: 1px solid alpha(#ffffff, 0.06);
+    box-shadow: 0 2px 8px alpha(#000000, 0.4);
+}
+
 /* Pannable / zoomable canvas inside the preview dialog */
 .jot-canvas {
     background:

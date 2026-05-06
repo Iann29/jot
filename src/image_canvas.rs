@@ -109,6 +109,9 @@ impl ImageCanvas {
         canvas.set_vexpand(true);
         canvas.set_focusable(true);
         canvas.set_cursor_from_name(Some("grab"));
+        // Crucial: clip our paint to the widget bounds so panning past the
+        // edges doesn't bleed onto sibling widgets (e.g. the header bar).
+        canvas.set_overflow(gtk::Overflow::Hidden);
 
         canvas.install_drag_pan();
         canvas.install_scroll_zoom();
