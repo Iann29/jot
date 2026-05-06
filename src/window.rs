@@ -9,6 +9,7 @@ use gtk::{gdk, gio};
 
 use crate::config::Config;
 use crate::db::{images_dir, Db};
+use crate::magnifier::MagnifierLens;
 use crate::maintenance;
 use crate::note::Note;
 
@@ -954,8 +955,9 @@ impl JotWindow {
     }
 
     fn show_image_preview(self: &Rc<Self>, texture: &gdk::Texture) {
-        const LENS_SIZE: i32 = 220;
-        const ZOOM: f64 = 2.0;
+        const LENS_RADIUS: f32 = 110.0;
+        const LENS_DIAM: i32 = (LENS_RADIUS as i32) * 2;
+        const ZOOM: f32 = 2.0;
 
         let dialog = adw::Dialog::builder()
             .content_width(960)
@@ -972,73 +974,27 @@ impl JotWindow {
         main_pic.set_hexpand(true);
         main_pic.add_css_class("jot-preview-image");
 
-        // Lens: a circular Box clipped via overflow=Hidden, hosting a Viewport
-        // into a 2× scaled Picture of the same texture. Moving the viewport's
-        // adjustments scrolls the visible region, giving the magnifier effect.
-        let zoomed_pic = gtk::Picture::for_paintable(texture);
-        zoomed_pic.set_can_shrink(false);
-        zoomed_pic.set_content_fit(gtk::ContentFit::Fill);
-        let zoomed_w = (texture.width() as f64 * ZOOM).round() as i32;
-        let zoomed_h = (texture.height() as f64 * ZOOM).round() as i32;
-        zoomed_pic.set_size_request(zoomed_w, zoomed_h);
-
-        // Pre-create adjustments so we can drive the scroll position directly
-        // without unwrapping Option each frame.
-        let hadj = gtk::Adjustment::new(
-            0.0,
-            0.0,
-            zoomed_w as f64,
-            1.0,
-            LENS_SIZE as f64,
-            LENS_SIZE as f64,
-        );
-        let vadj = gtk::Adjustment::new(
-            0.0,
-            0.0,
-            zoomed_h as f64,
-            1.0,
-            LENS_SIZE as f64,
-            LENS_SIZE as f64,
-        );
-        let viewport = gtk::Viewport::new(Some(&hadj), Some(&vadj));
-        viewport.set_child(Some(&zoomed_pic));
-        viewport.set_scroll_to_focus(false);
-
-        let lens = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // Custom-snapshot lens — translates+scales the texture inside a
+        // circular clip. Far simpler and less fragile than driving a
+        // Viewport with adjustments and a 2× sized inner Picture.
+        let lens = MagnifierLens::new(texture, LENS_RADIUS, ZOOM);
         lens.add_css_class("jot-lens");
-        lens.set_size_request(LENS_SIZE, LENS_SIZE);
         lens.set_halign(gtk::Align::Start);
         lens.set_valign(gtk::Align::Start);
-        lens.set_overflow(gtk::Overflow::Hidden);
-        lens.set_can_target(false); // pointer events fall through to main_pic
         lens.set_visible(false);
-        lens.append(&viewport);
 
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&main_pic));
         overlay.add_overlay(&lens);
 
-        // Motion driver — recompute lens position + zoom scroll on every move.
+        // Motion driver — recompute lens focus point + position on every move.
         let motion = gtk::EventControllerMotion::new();
         let main_clone = main_pic.clone();
         let lens_clone = lens.clone();
-        let hadj_clone = hadj.clone();
-        let vadj_clone = vadj.clone();
         let tex_w = texture.width() as f64;
         let tex_h = texture.height() as f64;
         motion.connect_motion(move |_, x, y| {
-            update_lens(
-                &main_clone,
-                &lens_clone,
-                &hadj_clone,
-                &vadj_clone,
-                tex_w,
-                tex_h,
-                ZOOM,
-                LENS_SIZE,
-                x,
-                y,
-            );
+            update_lens(&main_clone, &lens_clone, tex_w, tex_h, LENS_DIAM, x, y);
         });
         let lens_for_leave = lens.clone();
         motion.connect_leave(move |_| {
@@ -1380,12 +1336,9 @@ fn is_trailing_punct(c: char) -> bool {
 
 fn update_lens(
     main_pic: &gtk::Picture,
-    lens: &gtk::Box,
-    hadj: &gtk::Adjustment,
-    vadj: &gtk::Adjustment,
+    lens: &MagnifierLens,
     tex_w: f64,
     tex_h: f64,
-    zoom: f64,
     lens_size: i32,
     px: f64,
     py: f64,
@@ -1412,30 +1365,21 @@ fn update_lens(
     }
     lens.set_visible(true);
 
-    // Cursor in original-image coordinates.
+    // Cursor in source-texture coordinates.
     let img_x = (px - off_x) / scale;
     let img_y = (py - off_y) / scale;
+    lens.set_focus(img_x as f32, img_y as f32);
 
-    // Centre the lens on the cursor, but keep it inside the dialog area.
+    // Position the lens centred on the cursor, clamped inside the overlay
+    // so the disc never escapes the dialog.
     let lens_size_f = lens_size as f64;
     let half = lens_size_f / 2.0;
-    let mut lens_x = px - half;
-    let mut lens_y = py - half;
     let max_x = (widget_w - lens_size_f).max(0.0);
     let max_y = (widget_h - lens_size_f).max(0.0);
-    lens_x = lens_x.clamp(0.0, max_x);
-    lens_y = lens_y.clamp(0.0, max_y);
+    let lens_x = (px - half).clamp(0.0, max_x);
+    let lens_y = (py - half).clamp(0.0, max_y);
     lens.set_margin_start(lens_x as i32);
     lens.set_margin_top(lens_y as i32);
-
-    // Scroll the zoomed picture so the cursor's image-coord lands at the
-    // centre of the lens viewport.
-    let target_x = (img_x * zoom) - half;
-    let target_y = (img_y * zoom) - half;
-    let max_h = (tex_w * zoom - lens_size_f).max(0.0);
-    let max_v = (tex_h * zoom - lens_size_f).max(0.0);
-    hadj.set_value(target_x.clamp(0.0, max_h));
-    vadj.set_value(target_y.clamp(0.0, max_v));
 }
 
 fn scale_to_fit(tex_w: i32, tex_h: i32, max_w: i32, max_h: i32) -> (i32, i32) {

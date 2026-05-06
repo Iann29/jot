@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod db;
+mod magnifier;
 mod maintenance;
 mod note;
 mod window;
