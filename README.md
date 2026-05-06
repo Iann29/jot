@@ -2,6 +2,9 @@
 
 > Lightning-fast floating notes for tiling Wayland compositors.
 
+![Jot screenshot](docs/screenshots/jot.png)
+
+
 Jot is a tiny note-taking app built for the moment when something flashes by on
 screen and you just need to **dump it somewhere**, fast — a quote from an
 article, a snippet of code from a video, a thought before it slips. One
