@@ -41,9 +41,9 @@ sudo pacman -S --needed gtk4 libadwaita sqlite
 Grab the tarball from the [latest release](https://github.com/Iann29/jot/releases/latest) and run the installer:
 
 ```bash
-curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/latest/download/jot-v0.1.0-x86_64-linux.tar.gz
+curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/latest/download/jot-v0.2.0-x86_64-linux.tar.gz
 tar -xzf jot.tar.gz
-cd jot-v0.1.0-x86_64-linux
+cd jot-v0.2.0-x86_64-linux
 ./install.sh
 ```
 
