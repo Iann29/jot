@@ -14,8 +14,8 @@ use crate::note::Note;
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
 const UNDO_STACK_LIMIT: usize = 25;
 const IMAGE_TAG_NAME: &str = "jot-image";
-const IMAGE_MAX_W: i32 = 520;
-const IMAGE_MAX_H: i32 = 360;
+const IMAGE_MAX_W: i32 = 360;
+const IMAGE_MAX_H: i32 = 220;
 
 pub struct JotWindow {
     pub window: adw::ApplicationWindow,
