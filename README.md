@@ -30,31 +30,35 @@ respects window rules.
 
 ## Install
 
-### Arch / Omarchy
+### Prebuilt release (fastest — Arch / any modern Linux x86_64)
 
-Dependencies are likely already on your system; if not:
+Make sure GTK 4 + libadwaita are present:
+
+```bash
+sudo pacman -S --needed gtk4 libadwaita sqlite
+```
+
+Grab the tarball from the [latest release](https://github.com/Iann29/jot/releases/latest) and run the installer:
+
+```bash
+curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/latest/download/jot-v0.1.0-x86_64-linux.tar.gz
+tar -xzf jot.tar.gz
+cd jot-v0.1.0-x86_64-linux
+./install.sh
+```
+
+That drops `jot` into `~/.local/bin`, the desktop entry into `~/.local/share/applications`, and the icon into `~/.local/share/icons/hicolor/scalable/apps`. Make sure `~/.local/bin` is on your `PATH`.
+
+### Build from source
+
+If you want the bleeding edge:
 
 ```bash
 sudo pacman -S --needed gtk4 libadwaita sqlite rust
-```
-
-Clone and run the installer:
-
-```bash
 git clone https://github.com/Iann29/jot.git
 cd jot
 ./scripts/install.sh
 ```
-
-The script:
-
-1. Builds the release binary
-2. Installs `jot` to `~/.local/bin`
-3. Drops the desktop entry into `~/.local/share/applications`
-4. Installs the SVG icon
-5. Refreshes the desktop & icon caches
-
-Make sure `~/.local/bin` is in your `PATH`.
 
 ### Hyprland integration
 
