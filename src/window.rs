@@ -375,6 +375,62 @@ impl JotWindow {
         });
     }
 
+    /// Backspace/Delete pressed adjacent to an inline image: drop the whole
+    /// image — anchor + the invisible markdown run that follows it — in a
+    /// single buffer.delete(). Without this, the image_tag's
+    /// `editable=false` makes the user's Backspace silently no-op against
+    /// the markdown text after they delete the surrounding text. Returns
+    /// whether we consumed the keypress.
+    fn try_delete_adjacent_image(&self, backward: bool) -> bool {
+        // Selection-delete is handled by GTK's default with our editable=false
+        // tag, which we don't want to interfere with here.
+        if self.buffer.has_selection() {
+            return false;
+        }
+
+        let mark = self.buffer.get_insert();
+        let cursor = self.buffer.iter_at_mark(&mark);
+
+        // The probe is the char that the keypress would consume.
+        let probe = if backward {
+            let mut p = cursor.clone();
+            if !p.backward_char() {
+                return false;
+            }
+            p
+        } else {
+            cursor.clone()
+        };
+
+        // Find the anchor position. Either:
+        //  - probe is sitting on the U+FFFC anchor itself, or
+        //  - probe is inside the invisible markdown run that trails an anchor.
+        let anchor_iter = if probe.char() == '\u{FFFC}' {
+            probe.clone()
+        } else if probe.has_tag(&self.image_tag) {
+            let mut walker = probe.clone();
+            while walker.char() != '\u{FFFC}' {
+                if !walker.backward_char() {
+                    return false;
+                }
+            }
+            walker
+        } else {
+            return false;
+        };
+
+        let mut start = anchor_iter;
+        let mut end = start.clone();
+        end.forward_char(); // past the anchor itself
+        while end.has_tag(&self.image_tag) {
+            if !end.forward_char() {
+                break;
+            }
+        }
+        self.buffer.delete(&mut start, &mut end);
+        true
+    }
+
     fn install_shortcuts(self: &Rc<Self>) {
         // Window-level shortcuts (Bubble phase is fine — these don't conflict
         // with widget-level handling).
@@ -441,6 +497,40 @@ impl JotWindow {
             glib::Propagation::Proceed
         });
         self.window.add_controller(paste_ctl);
+
+        // Backspace/Delete inside the editor: intercept before the TextView's
+        // default handler so we can atomically remove an inline image when
+        // the cursor is touching one (anchor + invisible markdown).
+        let edit_ctl = gtk::EventControllerKey::new();
+        edit_ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let win = self.clone();
+        edit_ctl.connect_key_pressed(move |_, keyval, _, modifier| {
+            // Skip when the user is composing or holding modifiers we don't
+            // recognise — let GTK do its thing.
+            let plain = !modifier.contains(gdk::ModifierType::CONTROL_MASK)
+                && !modifier.contains(gdk::ModifierType::ALT_MASK);
+            if !plain {
+                return glib::Propagation::Proceed;
+            }
+            match keyval {
+                gdk::Key::BackSpace => {
+                    if win.try_delete_adjacent_image(true) {
+                        glib::Propagation::Stop
+                    } else {
+                        glib::Propagation::Proceed
+                    }
+                }
+                gdk::Key::Delete => {
+                    if win.try_delete_adjacent_image(false) {
+                        glib::Propagation::Stop
+                    } else {
+                        glib::Propagation::Proceed
+                    }
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.text_view.add_controller(edit_ctl);
     }
 
     fn build_settings_popover(self: &Rc<Self>) -> gtk::Popover {
@@ -909,9 +999,22 @@ impl JotWindow {
             return false;
         }
 
+        // Snapshot which note is open RIGHT NOW; the read_texture_async
+        // callback fires later and the user might switch notes in between.
+        // Without this guard, the image lands in the wrong note.
+        let target_id = self.state.borrow().current_id;
         let win = self.clone();
         clipboard.read_texture_async(None::<&gio::Cancellable>, move |result| match result {
             Ok(Some(texture)) => {
+                let now_id = win.state.borrow().current_id;
+                if now_id != target_id {
+                    tracing::info!(
+                        "paste cancelled: note switched ({:?} -> {:?})",
+                        target_id,
+                        now_id
+                    );
+                    return;
+                }
                 tracing::info!(
                     "received texture {}x{}",
                     texture.width(),
@@ -1051,9 +1154,16 @@ impl JotWindow {
             format!("![image]({})", path.display())
         };
         self.buffer.insert(&mut iter, &md);
+        let md_chars = md.chars().count() as i32;
         let start = self.buffer.iter_at_offset(after_anchor);
-        let end = self.buffer.iter_at_offset(after_anchor + md.chars().count() as i32);
+        let end = self.buffer.iter_at_offset(after_anchor + md_chars);
         self.buffer.apply_tag(&self.image_tag, &start, &end);
+
+        // Place the cursor *past* the invisible markdown so a subsequent
+        // keystroke lands in visible text, not in the hidden region (which
+        // is editable=false and would silently swallow input).
+        let after_tag = self.buffer.iter_at_offset(after_anchor + md_chars);
+        self.buffer.place_cursor(&after_tag);
     }
 
     fn show_image_preview(self: &Rc<Self>, texture: &gdk::Texture) {
@@ -1152,13 +1262,16 @@ impl JotWindow {
         let end = self.buffer.end_iter();
         self.buffer.remove_tag(&self.url_tag, &start, &end);
 
-        let text = self
-            .buffer
-            .text(&start, &end, true)
-            .to_string();
+        let text = self.buffer.text(&start, &end, true).to_string();
 
         for (off, len) in find_urls(&text) {
             let s = self.buffer.iter_at_offset(off as i32);
+            // Skip URLs that fall inside an invisible image-markdown region —
+            // those aren't really visible URLs the user can click; they're
+            // just paths on disk that happen to start with a scheme.
+            if s.has_tag(&self.image_tag) {
+                continue;
+            }
             let e = self.buffer.iter_at_offset((off + len) as i32);
             self.buffer.apply_tag(&self.url_tag, &s, &e);
         }
