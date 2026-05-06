@@ -11,12 +11,14 @@ pub struct Note {
 
 impl Note {
     pub fn derive_title(body: &str) -> String {
-        let first = body.lines().next().unwrap_or("").trim();
-        if first.is_empty() {
-            String::new()
-        } else {
-            first.chars().take(80).collect()
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || is_image_line(trimmed) {
+                continue;
+            }
+            return trimmed.chars().take(80).collect();
         }
+        String::new()
     }
 
     pub fn display_title(&self) -> String {
@@ -28,20 +30,27 @@ impl Note {
     }
 
     pub fn snippet(&self) -> String {
-        let mut lines = self
-            .body
-            .lines()
-            .skip(1)
-            .map(str::trim)
-            .filter(|l| !l.is_empty());
-        match lines.next() {
-            Some(line) => line.chars().take(120).collect(),
-            None => String::new(),
+        let mut found_title = false;
+        for line in self.body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || is_image_line(trimmed) {
+                continue;
+            }
+            if !found_title {
+                found_title = true;
+                continue;
+            }
+            return trimmed.chars().take(120).collect();
         }
+        String::new()
     }
 
     pub fn matches(&self, needle: &str) -> bool {
         let n = needle.to_lowercase();
         self.title.to_lowercase().contains(&n) || self.body.to_lowercase().contains(&n)
     }
+}
+
+fn is_image_line(line: &str) -> bool {
+    line.starts_with("![image](") && line.ends_with(')')
 }

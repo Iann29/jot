@@ -196,6 +196,14 @@ window.jot-window > contents {
     font-style: italic;
 }
 
+.jot-inline-image {
+    border-radius: 10px;
+    margin: 8px 4px;
+    background: alpha(#000000, 0.25);
+    box-shadow: 0 2px 12px alpha(#000000, 0.35);
+    min-width: 80px;
+}
+
 /* Scrollbars subtle */
 scrollbar {
     background: transparent;

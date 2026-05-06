@@ -84,6 +84,15 @@ impl Db {
         conn.execute("DELETE FROM notes WHERE id=?1", params![id])?;
         Ok(())
     }
+
+    pub fn restore_note(&self, note: &Note) -> Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute(
+            "INSERT INTO notes (id, title, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![note.id, note.title, note.body, note.created_at, note.updated_at],
+        )?;
+        Ok(())
+    }
 }
 
 pub fn data_dir() -> Result<PathBuf> {

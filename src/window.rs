@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -12,6 +12,10 @@ use crate::db::{images_dir, Db};
 use crate::note::Note;
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
+const UNDO_STACK_LIMIT: usize = 25;
+const IMAGE_TAG_NAME: &str = "jot-image";
+const IMAGE_MAX_W: i32 = 520;
+const IMAGE_MAX_H: i32 = 360;
 
 pub struct JotWindow {
     pub window: adw::ApplicationWindow,
@@ -19,10 +23,12 @@ pub struct JotWindow {
     list_box: gtk::ListBox,
     text_view: gtk::TextView,
     buffer: gtk::TextBuffer,
+    image_tag: gtk::TextTag,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
     search_entry: gtk::SearchEntry,
+    opacity_provider: gtk::CssProvider,
     state: RefCell<State>,
     suppress: Cell<bool>,
     autosave: RefCell<Option<glib::SourceId>>,
@@ -33,6 +39,7 @@ struct State {
     current_id: Option<i64>,
     config: Config,
     filter: String,
+    deleted_stack: Vec<Note>,
 }
 
 impl JotWindow {
@@ -127,6 +134,13 @@ impl JotWindow {
         title_box.append(&subtitle_label);
 
         let buffer = gtk::TextBuffer::new(None);
+        let image_tag = gtk::TextTag::builder()
+            .name(IMAGE_TAG_NAME)
+            .invisible(true)
+            .editable(false)
+            .build();
+        buffer.tag_table().add(&image_tag);
+
         let text_view = gtk::TextView::builder()
             .buffer(&buffer)
             .wrap_mode(gtk::WrapMode::WordChar)
@@ -172,21 +186,35 @@ impl JotWindow {
         root.append(&split);
         window.set_content(Some(&root));
 
+        // Per-instance CSS provider for opacity changes (so we don't keep
+        // attaching a new global provider every time the slider moves).
+        let opacity_provider = gtk::CssProvider::new();
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &opacity_provider,
+                gtk::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        }
+
         let this = Rc::new(JotWindow {
             window: window.clone(),
             db,
             list_box: list_box.clone(),
             text_view: text_view.clone(),
             buffer: buffer.clone(),
+            image_tag,
             title_label,
             subtitle_label,
             placeholder,
             search_entry: search_entry.clone(),
+            opacity_provider,
             state: RefCell::new(State {
                 notes: Vec::new(),
                 current_id: None,
                 config,
                 filter: String::new(),
+                deleted_stack: Vec::new(),
             }),
             suppress: Cell::new(false),
             autosave: RefCell::new(None),
@@ -300,11 +328,13 @@ impl JotWindow {
     }
 
     fn install_shortcuts(self: &Rc<Self>) {
+        // Window-level shortcuts (Bubble phase is fine — these don't conflict
+        // with widget-level handling).
         let controller = gtk::EventControllerKey::new();
-
         let win = self.clone();
         controller.connect_key_pressed(move |_, keyval, _, modifier| {
             let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
+            let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
             match keyval {
                 gdk::Key::Escape => {
                     win.save_pending();
@@ -323,8 +353,11 @@ impl JotWindow {
                     win.search_entry.grab_focus();
                     glib::Propagation::Stop
                 }
-                gdk::Key::v if ctrl => {
-                    if win.try_paste_image() {
+                // Ctrl+Z: restore last deleted note. If the stack is empty we
+                // proceed so the TextView's own undo (text edits) still works.
+                gdk::Key::z if ctrl && !shift => {
+                    if !win.state.borrow().deleted_stack.is_empty() {
+                        win.undo_delete();
                         glib::Propagation::Stop
                     } else {
                         glib::Propagation::Proceed
@@ -334,6 +367,25 @@ impl JotWindow {
             }
         });
         self.window.add_controller(controller);
+
+        // Paste handler — must run BEFORE the focused widget's default Ctrl+V.
+        // We register on the WINDOW with Capture phase so it fires regardless
+        // of which widget currently has focus (TextView, search entry, etc.)
+        // and runs before the default paste-clipboard action.
+        let paste_ctl = gtk::EventControllerKey::new();
+        paste_ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let win = self.clone();
+        paste_ctl.connect_key_pressed(move |_, keyval, _, modifier| {
+            let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
+            if ctrl && keyval == gdk::Key::v {
+                tracing::debug!("Ctrl+V captured on window");
+                if win.try_paste_image() {
+                    return glib::Propagation::Stop;
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        self.window.add_controller(paste_ctl);
     }
 
     fn build_settings_popover(self: &Rc<Self>) -> gtk::Popover {
@@ -453,7 +505,7 @@ impl JotWindow {
         self.state.borrow_mut().current_id = Some(id);
 
         self.suppress.set(true);
-        self.buffer.set_text(&body);
+        self.load_body_into_buffer(&body);
         self.suppress.set(false);
 
         self.update_title(&body, updated_at);
@@ -511,6 +563,17 @@ impl JotWindow {
             handle.remove();
         }
 
+        // Snapshot the note (with current buffer text, so unsaved edits survive undo)
+        let live_body = self.extract_body_for_save();
+        let snapshot: Option<Note> = {
+            let state = self.state.borrow();
+            state.notes.iter().find(|n| n.id == id).cloned().map(|mut n| {
+                n.title = Note::derive_title(&live_body);
+                n.body = live_body;
+                n
+            })
+        };
+
         if let Err(e) = self.db.delete_note(id) {
             tracing::error!("delete failed: {e}");
             return;
@@ -519,6 +582,12 @@ impl JotWindow {
         let mut state = self.state.borrow_mut();
         state.notes.retain(|n| n.id != id);
         state.current_id = None;
+        if let Some(note) = snapshot {
+            state.deleted_stack.push(note);
+            if state.deleted_stack.len() > UNDO_STACK_LIMIT {
+                state.deleted_stack.remove(0);
+            }
+        }
         let next = state.notes.first().map(|n| n.id);
         drop(state);
 
@@ -533,6 +602,28 @@ impl JotWindow {
             self.subtitle_label.set_text("");
             self.update_placeholder();
         }
+    }
+
+    fn undo_delete(self: &Rc<Self>) {
+        let note = match self.state.borrow_mut().deleted_stack.pop() {
+            Some(n) => n,
+            None => return,
+        };
+
+        if let Err(e) = self.db.restore_note(&note) {
+            tracing::error!("restore failed: {e}");
+            self.state.borrow_mut().deleted_stack.push(note);
+            return;
+        }
+
+        let id = note.id;
+        {
+            let mut state = self.state.borrow_mut();
+            state.notes.push(note);
+            state.notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        }
+        self.rebuild_list();
+        self.select_note(id);
     }
 
     fn schedule_autosave(self: &Rc<Self>) {
@@ -555,10 +646,7 @@ impl JotWindow {
         let current = self.state.borrow().current_id;
         let Some(id) = current else { return };
 
-        let body = self
-            .buffer
-            .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false)
-            .to_string();
+        let body = self.extract_body_for_save();
         let title = Note::derive_title(&body);
 
         if let Err(e) = self.db.update_note(id, &title, &body) {
@@ -617,10 +705,13 @@ impl JotWindow {
 
     fn apply_opacity(&self) {
         let opacity = self.state.borrow().config.opacity;
-        // The window itself stays fully opaque (so resize handles work),
-        // but the inner stack uses CSS variable.
-        // We achieve transparency by setting window.set_opacity for the whole surface.
-        self.window.set_opacity(opacity);
+        // Only adjust the window background — leave content (text, images,
+        // widgets) fully opaque. Compositor-side blur on the layer handles the
+        // glassy look.
+        let css = format!(
+            "window.jot-window {{ background-color: alpha(#0f1014, {opacity:.3}); }}"
+        );
+        self.opacity_provider.load_from_string(&css);
     }
 
     fn apply_font_size(&self) {
@@ -643,37 +734,40 @@ impl JotWindow {
     }
 
     fn try_paste_image(self: &Rc<Self>) -> bool {
-        let display = match gdk::Display::default() {
-            Some(d) => d,
-            None => return false,
+        let Some(display) = gdk::Display::default() else {
+            return false;
         };
         let clipboard = display.clipboard();
-
         let formats = clipboard.formats();
-        let has_image = formats.contains_type(gdk::Texture::static_type())
-            || formats
-                .mime_types()
-                .iter()
-                .any(|m: &glib::GString| m.starts_with("image/"));
 
-        if !has_image {
+        let mimes: Vec<String> = formats.mime_types().iter().map(|m| m.to_string()).collect();
+        let has_texture = formats.contains_type(gdk::Texture::static_type());
+        let has_image_mime = mimes.iter().any(|m| m.starts_with("image/"));
+        tracing::info!(
+            "Ctrl+V: texture={has_texture} image_mime={has_image_mime} mimes={mimes:?}"
+        );
+
+        if !has_texture && !has_image_mime {
             return false;
         }
 
         let win = self.clone();
-        clipboard.read_texture_async(
-            None::<&gio::Cancellable>,
-            move |result| {
-                if let Ok(Some(texture)) = result {
-                    win.handle_pasted_texture(texture);
-                }
-            },
-        );
+        clipboard.read_texture_async(None::<&gio::Cancellable>, move |result| match result {
+            Ok(Some(texture)) => {
+                tracing::info!(
+                    "received texture {}x{}",
+                    texture.width(),
+                    texture.height()
+                );
+                win.handle_pasted_texture(texture);
+            }
+            Ok(None) => tracing::warn!("clipboard returned no texture"),
+            Err(e) => tracing::warn!("read_texture_async failed: {e}"),
+        });
         true
     }
 
     fn handle_pasted_texture(self: &Rc<Self>, texture: gdk::Texture) {
-        // Save to disk, insert markdown link
         let images = match images_dir() {
             Ok(p) => p,
             Err(e) => {
@@ -687,13 +781,139 @@ impl JotWindow {
             tracing::error!("save image failed: {e}");
             return;
         }
+        tracing::info!("image saved to {}", path.display());
+        self.insert_image_at_cursor(&path, &texture);
+    }
 
-        // Insert markdown reference at cursor
+    /// Load a markdown-style body into the buffer, replacing `![image](path)`
+    /// references with inline Picture widgets while keeping the markdown text
+    /// preserved under an invisible tag for round-trip persistence.
+    fn load_body_into_buffer(&self, body: &str) {
+        self.buffer.set_text("");
+        for part in parse_markdown_body(body) {
+            match part {
+                BodyPart::Text(t) => {
+                    let mut iter = self.buffer.end_iter();
+                    self.buffer.insert(&mut iter, &t);
+                }
+                BodyPart::Image(path_str) => {
+                    self.insert_image_part(&path_str);
+                }
+            }
+        }
+    }
+
+    fn insert_image_part(&self, path_str: &str) {
+        let path = Path::new(path_str);
+        match gdk::Texture::from_filename(path) {
+            Ok(texture) => self.embed_image(path, &texture, /*with_newlines=*/ false),
+            Err(e) => {
+                tracing::warn!("could not load {}: {e}", path_str);
+                let mut iter = self.buffer.end_iter();
+                self.buffer
+                    .insert(&mut iter, &format!("![image]({})", path_str));
+            }
+        }
+    }
+
+    fn insert_image_at_cursor(&self, path: &Path, texture: &gdk::Texture) {
+        // Move cursor to end-of-line so the image always lands on its own line.
         let mark = self.buffer.get_insert();
         let mut iter = self.buffer.iter_at_mark(&mark);
-        let text = format!("![image]({})", path.display());
-        self.buffer.insert(&mut iter, &text);
+        if !iter.starts_line() {
+            self.buffer.insert(&mut iter, "\n");
+        }
+        self.embed_image(path, texture, /*with_newlines=*/ true);
     }
+
+    fn embed_image(&self, path: &Path, texture: &gdk::Texture, with_newlines: bool) {
+        // 1. Anchor + Picture (visible inline)
+        let mut iter = self.buffer.end_iter();
+        let anchor = self.buffer.create_child_anchor(&mut iter);
+
+        let (w, h) = scale_to_fit(texture.width(), texture.height(), IMAGE_MAX_W, IMAGE_MAX_H);
+        let picture = gtk::Picture::for_paintable(texture);
+        picture.add_css_class("jot-inline-image");
+        picture.set_can_shrink(false);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.set_size_request(w, h);
+        self.text_view.add_child_at_anchor(&picture, &anchor);
+
+        // 2. Invisible markdown reference (so the body round-trips)
+        let mut iter = self.buffer.end_iter();
+        let start_off = iter.offset();
+        let md = if with_newlines {
+            format!("\n![image]({})\n", path.display())
+        } else {
+            format!("![image]({})", path.display())
+        };
+        self.buffer.insert(&mut iter, &md);
+        let start = self.buffer.iter_at_offset(start_off);
+        let end = self.buffer.end_iter();
+        self.buffer.apply_tag(&self.image_tag, &start, &end);
+    }
+
+    /// Extract the body for persistence — `text()` with `include_hidden=true`
+    /// returns the visible text plus the invisible markdown references. We
+    /// strip the Object Replacement Character (U+FFFC) that GTK uses as the
+    /// in-stream marker for child anchors / paintables.
+    fn extract_body_for_save(&self) -> String {
+        let raw = self
+            .buffer
+            .text(&self.buffer.start_iter(), &self.buffer.end_iter(), true)
+            .to_string();
+        raw.replace('\u{FFFC}', "")
+    }
+}
+
+#[derive(Debug)]
+enum BodyPart {
+    Text(String),
+    Image(String),
+}
+
+fn scale_to_fit(tex_w: i32, tex_h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
+    if tex_w <= 0 || tex_h <= 0 {
+        return (max_w.min(160), max_h.min(160));
+    }
+    if tex_w <= max_w && tex_h <= max_h {
+        return (tex_w, tex_h);
+    }
+    let scale_w = max_w as f64 / tex_w as f64;
+    let scale_h = max_h as f64 / tex_h as f64;
+    let scale = scale_w.min(scale_h);
+    let w = ((tex_w as f64) * scale).round() as i32;
+    let h = ((tex_h as f64) * scale).round() as i32;
+    (w.max(40), h.max(40))
+}
+
+fn parse_markdown_body(body: &str) -> Vec<BodyPart> {
+    const PREFIX: &[u8] = b"![image](";
+    let bytes = body.as_bytes();
+    let mut parts = Vec::new();
+    let mut buf = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(PREFIX) {
+            let after = i + PREFIX.len();
+            if let Some(rel) = bytes[after..].iter().position(|&b| b == b')') {
+                let end = after + rel;
+                if !buf.is_empty() {
+                    parts.push(BodyPart::Text(std::mem::take(&mut buf)));
+                }
+                parts.push(BodyPart::Image(body[after..end].to_string()));
+                i = end + 1;
+                continue;
+            }
+        }
+        let ch = body[i..].chars().next().unwrap();
+        buf.push(ch);
+        i += ch.len_utf8();
+    }
+    if !buf.is_empty() {
+        parts.push(BodyPart::Text(buf));
+    }
+    parts
 }
 
 fn build_title(subtitle: &str) -> gtk::Box {
