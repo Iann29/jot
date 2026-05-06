@@ -14,8 +14,8 @@ use crate::note::Note;
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
 const UNDO_STACK_LIMIT: usize = 25;
 const IMAGE_TAG_NAME: &str = "jot-image";
-const IMAGE_MAX_W: i32 = 360;
-const IMAGE_MAX_H: i32 = 220;
+const IMAGE_MAX_W: i32 = 240;
+const IMAGE_MAX_H: i32 = 160;
 
 pub struct JotWindow {
     pub window: adw::ApplicationWindow,
@@ -817,19 +817,39 @@ impl JotWindow {
     }
 
     fn insert_image_at_cursor(&self, path: &Path, texture: &gdk::Texture) {
-        // Move cursor to end-of-line so the image always lands on its own line.
+        // Drop a newline before the image if we're not on a fresh line, so
+        // the image isn't squashed against existing text.
         let mark = self.buffer.get_insert();
-        let mut iter = self.buffer.iter_at_mark(&mark);
+        let iter = self.buffer.iter_at_mark(&mark);
         if !iter.starts_line() {
+            let mut iter = self.buffer.iter_at_mark(&mark);
             self.buffer.insert(&mut iter, "\n");
         }
-        self.embed_image(path, texture, /*with_newlines=*/ true);
+        self.embed_image_at_cursor(path, texture, /*with_newlines=*/ true);
     }
 
+    /// Insert image at the END of the buffer (used during body load).
     fn embed_image(&self, path: &Path, texture: &gdk::Texture, with_newlines: bool) {
-        // 1. Anchor + Picture (visible inline)
         let mut iter = self.buffer.end_iter();
-        let anchor = self.buffer.create_child_anchor(&mut iter);
+        self.embed_image_at_iter(&mut iter, path, texture, with_newlines);
+    }
+
+    /// Insert image at the current insert mark (used by paste).
+    fn embed_image_at_cursor(&self, path: &Path, texture: &gdk::Texture, with_newlines: bool) {
+        let mark = self.buffer.get_insert();
+        let mut iter = self.buffer.iter_at_mark(&mark);
+        self.embed_image_at_iter(&mut iter, path, texture, with_newlines);
+    }
+
+    fn embed_image_at_iter(
+        &self,
+        iter: &mut gtk::TextIter,
+        path: &Path,
+        texture: &gdk::Texture,
+        with_newlines: bool,
+    ) {
+        // 1. Anchor + Picture (visible inline)
+        let anchor = self.buffer.create_child_anchor(iter);
 
         let (w, h) = scale_to_fit(texture.width(), texture.height(), IMAGE_MAX_W, IMAGE_MAX_H);
         let picture = gtk::Picture::for_paintable(texture);
@@ -839,17 +859,19 @@ impl JotWindow {
         picture.set_size_request(w, h);
         self.text_view.add_child_at_anchor(&picture, &anchor);
 
-        // 2. Invisible markdown reference (so the body round-trips)
-        let mut iter = self.buffer.end_iter();
-        let start_off = iter.offset();
+        // 2. Invisible markdown reference (so the body round-trips). After
+        // creating the anchor, `iter` has advanced past it — re-fetch via
+        // offset so the next insert lands right after the anchor.
+        let after_anchor = iter.offset();
+        let mut iter = self.buffer.iter_at_offset(after_anchor);
         let md = if with_newlines {
             format!("\n![image]({})\n", path.display())
         } else {
             format!("![image]({})", path.display())
         };
         self.buffer.insert(&mut iter, &md);
-        let start = self.buffer.iter_at_offset(start_off);
-        let end = self.buffer.end_iter();
+        let start = self.buffer.iter_at_offset(after_anchor);
+        let end = self.buffer.iter_at_offset(after_anchor + md.chars().count() as i32);
         self.buffer.apply_tag(&self.image_tag, &start, &end);
     }
 
