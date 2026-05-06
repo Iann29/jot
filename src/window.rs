@@ -38,6 +38,8 @@ pub struct JotWindow {
     state: RefCell<State>,
     suppress: Cell<bool>,
     autosave: RefCell<Option<glib::SourceId>>,
+    pointer_pos: Cell<Option<(f64, f64)>>,
+    ctrl_held: Cell<bool>,
 }
 
 struct State {
@@ -238,12 +240,15 @@ impl JotWindow {
             }),
             suppress: Cell::new(false),
             autosave: RefCell::new(None),
+            pointer_pos: Cell::new(None),
+            ctrl_held: Cell::new(false),
         });
 
         // Wire callbacks
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
         this.install_shortcuts();
         this.install_url_click();
+        this.install_url_hover_cursor();
         this.install_drop_target();
         this.apply_opacity();
         this.refresh_notes();
@@ -1016,6 +1021,69 @@ impl JotWindow {
             }
         });
         self.text_view.add_controller(click_ctl);
+    }
+
+    fn install_url_hover_cursor(self: &Rc<Self>) {
+        // Motion: track pointer position over the editor and the live
+        // modifier state so we can flip the cursor without waiting for a
+        // separate keyboard event.
+        let motion = gtk::EventControllerMotion::new();
+        let win = self.clone();
+        motion.connect_motion(move |controller, x, y| {
+            win.pointer_pos.set(Some((x, y)));
+            if let Some(event) = controller.current_event() {
+                let ctrl = event
+                    .modifier_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK);
+                win.ctrl_held.set(ctrl);
+            }
+            win.refresh_link_cursor();
+        });
+        let win = self.clone();
+        motion.connect_leave(move |_| {
+            win.pointer_pos.set(None);
+            win.refresh_link_cursor();
+        });
+        self.text_view.add_controller(motion);
+
+        // Modifiers: catch Ctrl press / release even while the pointer is
+        // stationary, so the cursor flips the moment the user holds Ctrl.
+        let key = gtk::EventControllerKey::new();
+        let win = self.clone();
+        key.connect_modifiers(move |_, mods| {
+            let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
+            if ctrl != win.ctrl_held.get() {
+                win.ctrl_held.set(ctrl);
+                win.refresh_link_cursor();
+            }
+            glib::Propagation::Proceed
+        });
+        self.window.add_controller(key);
+    }
+
+    fn refresh_link_cursor(&self) {
+        let over_url = match self.pointer_pos.get() {
+            Some((x, y)) => self.is_pointer_over_url(x, y),
+            None => false,
+        };
+        let name = if self.ctrl_held.get() && over_url {
+            "pointer"
+        } else {
+            "text"
+        };
+        self.text_view.set_cursor_from_name(Some(name));
+    }
+
+    fn is_pointer_over_url(&self, x: f64, y: f64) -> bool {
+        let (bx, by) = self.text_view.window_to_buffer_coords(
+            gtk::TextWindowType::Widget,
+            x as i32,
+            y as i32,
+        );
+        match self.text_view.iter_at_location(bx, by) {
+            Some(iter) => iter.has_tag(&self.url_tag),
+            None => false,
+        }
     }
 
     fn install_drop_target(self: &Rc<Self>) {
