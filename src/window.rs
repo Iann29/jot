@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -15,6 +16,7 @@ use crate::note::Note;
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
 const UNDO_STACK_LIMIT: usize = 25;
+const TEXT_UNDO_LIMIT: usize = 80;
 const IMAGE_TAG_NAME: &str = "jot-image";
 const URL_TAG_NAME: &str = "jot-url";
 const IMAGE_MAX_W: i32 = 400;
@@ -49,6 +51,13 @@ struct State {
     config: Config,
     filter: String,
     deleted_stack: Vec<Note>,
+    text_undo: VecDeque<TextSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct TextSnapshot {
+    note_id: i64,
+    body: String,
 }
 
 impl JotWindow {
@@ -238,6 +247,7 @@ impl JotWindow {
                 config,
                 filter: String::new(),
                 deleted_stack: Vec::new(),
+                text_undo: VecDeque::new(),
             }),
             suppress: Cell::new(false),
             autosave: RefCell::new(None),
@@ -391,11 +401,18 @@ impl JotWindow {
                     win.search_entry.grab_focus();
                     glib::Propagation::Stop
                 }
-                // Ctrl+Z: restore last deleted note. If the stack is empty we
-                // proceed so the TextView's own undo (text edits) still works.
+                // Ctrl+Z: layered undo —
+                //   1) restore last deleted note if any,
+                //   2) otherwise roll the current note's body back to the
+                //      previous snapshot (covers image deletions etc. that
+                //      the TextView's native undo can't recreate),
+                //   3) only fall through to native undo when both stacks
+                //      are empty.
                 gdk::Key::z if ctrl && !shift => {
                     if !win.state.borrow().deleted_stack.is_empty() {
                         win.undo_delete();
+                        glib::Propagation::Stop
+                    } else if win.try_text_undo() {
                         glib::Propagation::Stop
                     } else {
                         glib::Propagation::Proceed
@@ -549,6 +566,9 @@ impl JotWindow {
         self.suppress.set(true);
         self.load_body_into_buffer(&body);
         self.suppress.set(false);
+
+        // Push the initial body so Ctrl+Z can roll back to "as freshly opened".
+        self.push_text_snapshot(id, &body);
 
         self.update_title(&body, updated_at);
         self.update_placeholder();
@@ -729,6 +749,88 @@ impl JotWindow {
         self.update_title(&body, now);
         self.rebuild_list();
         self.refresh_url_tags();
+
+        // Snapshot for Ctrl+Z. Each saved version becomes a step on the
+        // text-undo stack.
+        self.push_text_snapshot(id, &body);
+    }
+
+    fn push_text_snapshot(&self, note_id: i64, body: &str) {
+        let mut state = self.state.borrow_mut();
+        if state
+            .text_undo
+            .back()
+            .is_some_and(|s| s.note_id == note_id && s.body == body)
+        {
+            return;
+        }
+        state.text_undo.push_back(TextSnapshot {
+            note_id,
+            body: body.to_string(),
+        });
+        while state.text_undo.len() > TEXT_UNDO_LIMIT {
+            state.text_undo.pop_front();
+        }
+    }
+
+    /// Pop the text-undo stack until we find a body that's actually
+    /// different from what's in the buffer right now (skipping foreign
+    /// notes and stale duplicates), then restore it. Returns whether a
+    /// restore happened.
+    fn try_text_undo(self: &Rc<Self>) -> bool {
+        let current_id = match self.state.borrow().current_id {
+            Some(id) => id,
+            None => return false,
+        };
+        let current_body = self.extract_body_for_save();
+
+        let target = loop {
+            let mut state = self.state.borrow_mut();
+            match state.text_undo.pop_back() {
+                None => return false,
+                Some(snap) if snap.note_id != current_id => continue,
+                Some(snap) if snap.body == current_body => continue,
+                Some(snap) => break snap,
+            }
+        };
+
+        // Cancel any in-flight autosave so it doesn't immediately re-push
+        // the pre-undo body and undo our undo.
+        if let Some(handle) = self.autosave.borrow_mut().take() {
+            handle.remove();
+        }
+
+        let title = Note::derive_title(&target.body);
+        if let Err(e) = self.db.update_note(current_id, &title, &target.body) {
+            tracing::error!("undo restore failed: {e}");
+            return false;
+        }
+
+        self.suppress.set(true);
+        self.load_body_into_buffer(&target.body);
+        self.suppress.set(false);
+
+        let now = Utc::now();
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(note) = state.notes.iter_mut().find(|n| n.id == current_id) {
+                note.title = title.clone();
+                note.body = target.body.clone();
+                note.updated_at = now;
+            }
+            state.notes.sort_by(|a, b| {
+                b.pinned
+                    .cmp(&a.pinned)
+                    .then(b.updated_at.cmp(&a.updated_at))
+            });
+        }
+        self.update_title(&target.body, now);
+        self.rebuild_list();
+
+        // Place cursor at end so user can continue typing where it makes sense.
+        let end = self.buffer.end_iter();
+        self.buffer.place_cursor(&end);
+        true
     }
 
     fn update_title(&self, body: &str, updated_at: DateTime<Utc>) {
