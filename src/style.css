@@ -204,6 +204,31 @@ window.jot-window > contents {
     min-width: 80px;
 }
 
+/* Pin star in note rows */
+.jot-pin-btn {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    padding: 4px;
+    min-height: 24px;
+    min-width: 24px;
+    color: alpha(#e6e6ea, 0.35);
+    opacity: 0.0;
+    transition: opacity 120ms ease, color 120ms ease;
+}
+.jot-list > row:hover .jot-pin-btn,
+.jot-list > row:selected .jot-pin-btn,
+.jot-pin-btn.jot-pin-active {
+    opacity: 1.0;
+}
+.jot-pin-btn:hover {
+    background: alpha(#ffffff, 0.06);
+    color: #ffd166;
+}
+.jot-pin-active {
+    color: #ffd166;
+}
+
 /* Scrollbars subtle */
 scrollbar {
     background: transparent;

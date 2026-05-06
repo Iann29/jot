@@ -15,8 +15,11 @@ use crate::note::Note;
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
 const UNDO_STACK_LIMIT: usize = 25;
 const IMAGE_TAG_NAME: &str = "jot-image";
+const URL_TAG_NAME: &str = "jot-url";
 const IMAGE_MAX_W: i32 = 400;
 const IMAGE_MAX_H: i32 = 260;
+const DROP_TEXT_EXT: &[&str] = &["md", "markdown", "txt"];
+const DROP_IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
 
 pub struct JotWindow {
     pub window: adw::ApplicationWindow,
@@ -25,10 +28,12 @@ pub struct JotWindow {
     text_view: gtk::TextView,
     buffer: gtk::TextBuffer,
     image_tag: gtk::TextTag,
+    url_tag: gtk::TextTag,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
     search_entry: gtk::SearchEntry,
+    toast_overlay: adw::ToastOverlay,
     opacity_provider: gtk::CssProvider,
     state: RefCell<State>,
     suppress: Cell<bool>,
@@ -142,6 +147,13 @@ impl JotWindow {
             .build();
         buffer.tag_table().add(&image_tag);
 
+        let url_tag = gtk::TextTag::builder()
+            .name(URL_TAG_NAME)
+            .underline(gtk::pango::Underline::Single)
+            .foreground("#7c8cff")
+            .build();
+        buffer.tag_table().add(&url_tag);
+
         let text_view = gtk::TextView::builder()
             .buffer(&buffer)
             .wrap_mode(gtk::WrapMode::WordChar)
@@ -181,10 +193,15 @@ impl JotWindow {
         split.append(&sidebar);
         split.append(&editor_shell);
 
+        // ToastOverlay sits between the split and the root so toasts hover
+        // above the editor without affecting layout.
+        let toast_overlay = adw::ToastOverlay::new();
+        toast_overlay.set_child(Some(&split));
+
         // Root layout
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&header);
-        root.append(&split);
+        root.append(&toast_overlay);
         window.set_content(Some(&root));
 
         // Per-instance CSS provider for opacity changes (so we don't keep
@@ -205,10 +222,12 @@ impl JotWindow {
             text_view: text_view.clone(),
             buffer: buffer.clone(),
             image_tag,
+            url_tag,
             title_label,
             subtitle_label,
             placeholder,
             search_entry: search_entry.clone(),
+            toast_overlay: toast_overlay.clone(),
             opacity_provider,
             state: RefCell::new(State {
                 notes: Vec::new(),
@@ -224,6 +243,8 @@ impl JotWindow {
         // Wire callbacks
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
         this.install_shortcuts();
+        this.install_url_click();
+        this.install_drop_target();
         this.apply_opacity();
         this.refresh_notes();
 
@@ -457,13 +478,13 @@ impl JotWindow {
         popover
     }
 
-    fn refresh_notes(&self) {
+    fn refresh_notes(self: &Rc<Self>) {
         let notes = self.db.list_notes().unwrap_or_default();
         self.state.borrow_mut().notes = notes;
         self.rebuild_list();
     }
 
-    fn rebuild_list(&self) {
+    fn rebuild_list(self: &Rc<Self>) {
         while let Some(child) = self.list_box.first_child() {
             self.list_box.remove(&child);
         }
@@ -474,17 +495,21 @@ impl JotWindow {
 
         let mut selected_row: Option<gtk::ListBoxRow> = None;
 
-        for note in state.notes.iter() {
-            if !filter.is_empty() && !note.matches(&filter) {
-                continue;
-            }
-            let row = build_note_row(note);
+        let visible_notes: Vec<Note> = state
+            .notes
+            .iter()
+            .filter(|n| filter.is_empty() || n.matches(&filter))
+            .cloned()
+            .collect();
+        drop(state);
+
+        for note in &visible_notes {
+            let row = self.build_note_row(note);
             self.list_box.append(&row);
             if Some(note.id) == current {
                 selected_row = Some(row);
             }
         }
-        drop(state);
 
         if let Some(row) = selected_row {
             self.suppress.set(true);
@@ -613,6 +638,18 @@ impl JotWindow {
             self.subtitle_label.set_text("");
             self.update_placeholder();
         }
+
+        // Surface a toast so the user knows the undo is one keystroke / one
+        // click away. The toast button calls back into undo_delete which
+        // pops from the same stack.
+        let toast = adw::Toast::builder()
+            .title("Note deleted")
+            .button_label("Undo")
+            .timeout(6)
+            .build();
+        let win = self.clone();
+        toast.connect_button_clicked(move |_| win.undo_delete());
+        self.toast_overlay.add_toast(toast);
     }
 
     fn undo_delete(self: &Rc<Self>) {
@@ -653,7 +690,7 @@ impl JotWindow {
         *self.autosave.borrow_mut() = Some(id);
     }
 
-    fn save_pending(&self) {
+    fn save_pending(self: &Rc<Self>) {
         let current = self.state.borrow().current_id;
         let Some(id) = current else { return };
 
@@ -667,23 +704,25 @@ impl JotWindow {
 
         // Update in-memory state
         let now = Utc::now();
-        let mut state = self.state.borrow_mut();
-        if let Some(note) = state.notes.iter_mut().find(|n| n.id == id) {
-            note.title = title.clone();
-            note.body = body.clone();
-            note.updated_at = now;
-        }
-        // Move to top
-        if let Some(pos) = state.notes.iter().position(|n| n.id == id) {
-            if pos > 0 {
-                let n = state.notes.remove(pos);
-                state.notes.insert(0, n);
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(note) = state.notes.iter_mut().find(|n| n.id == id) {
+                note.title = title.clone();
+                note.body = body.clone();
+                note.updated_at = now;
             }
+            // Re-sort: pinned first, then by recency. A non-pinned note can
+            // never jump above a pinned one even when it was just edited.
+            state.notes.sort_by(|a, b| {
+                b.pinned
+                    .cmp(&a.pinned)
+                    .then(b.updated_at.cmp(&a.updated_at))
+            });
         }
-        drop(state);
 
         self.update_title(&body, now);
         self.rebuild_list();
+        self.refresh_url_tags();
     }
 
     fn update_title(&self, body: &str, updated_at: DateTime<Utc>) {
@@ -812,6 +851,7 @@ impl JotWindow {
                 }
             }
         }
+        self.refresh_url_tags();
     }
 
     fn insert_image_part(&self, path_str: &str) {
@@ -899,12 +939,249 @@ impl JotWindow {
             .to_string();
         raw.replace('\u{FFFC}', "")
     }
+
+    /// Strip then re-apply the URL underline tag across the whole buffer.
+    /// Cheap enough to run on every load and after each autosave.
+    fn refresh_url_tags(&self) {
+        let start = self.buffer.start_iter();
+        let end = self.buffer.end_iter();
+        self.buffer.remove_tag(&self.url_tag, &start, &end);
+
+        let text = self
+            .buffer
+            .text(&start, &end, true)
+            .to_string();
+
+        for (off, len) in find_urls(&text) {
+            let s = self.buffer.iter_at_offset(off as i32);
+            let e = self.buffer.iter_at_offset((off + len) as i32);
+            self.buffer.apply_tag(&self.url_tag, &s, &e);
+        }
+    }
+
+    fn open_url_at_iter(&self, iter: &gtk::TextIter) -> bool {
+        if !iter.has_tag(&self.url_tag) {
+            return false;
+        }
+        let mut start = iter.clone();
+        if !start.starts_tag(Some(&self.url_tag)) {
+            start.backward_to_tag_toggle(Some(&self.url_tag));
+        }
+        let mut end = iter.clone();
+        end.forward_to_tag_toggle(Some(&self.url_tag));
+        let url = self.buffer.text(&start, &end, false).to_string();
+        if url.is_empty() {
+            return false;
+        }
+        tracing::info!("launching url {url}");
+        let launcher = gtk::UriLauncher::new(&url);
+        launcher.launch(
+            Some(&self.window),
+            None::<&gio::Cancellable>,
+            |result| {
+                if let Err(e) = result {
+                    tracing::warn!("UriLauncher failed: {e}");
+                }
+            },
+        );
+        true
+    }
+
+    fn install_url_click(self: &Rc<Self>) {
+        let click_ctl = gtk::GestureClick::new();
+        click_ctl.set_button(gdk::BUTTON_PRIMARY);
+        let win = self.clone();
+        let tv = self.text_view.clone();
+        click_ctl.connect_pressed(move |gesture, n_press, x, y| {
+            if n_press != 1 {
+                return;
+            }
+            let event = match gesture.current_event() {
+                Some(e) => e,
+                None => return,
+            };
+            let mods = event.modifier_state();
+            if !mods.contains(gdk::ModifierType::CONTROL_MASK) {
+                return;
+            }
+            let (bx, by) = tv.window_to_buffer_coords(
+                gtk::TextWindowType::Widget,
+                x as i32,
+                y as i32,
+            );
+            if let Some(iter) = tv.iter_at_location(bx, by) {
+                if win.open_url_at_iter(&iter) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                }
+            }
+        });
+        self.text_view.add_controller(click_ctl);
+    }
+
+    fn install_drop_target(self: &Rc<Self>) {
+        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        let win = self.clone();
+        drop.connect_drop(move |_, value, _, _| {
+            let file_list = match value.get::<gdk::FileList>() {
+                Ok(fl) => fl,
+                Err(_) => return false,
+            };
+            let mut handled = false;
+            for file in file_list.files() {
+                if win.handle_dropped_file(&file) {
+                    handled = true;
+                }
+            }
+            handled
+        });
+        self.text_view.add_controller(drop);
+    }
+
+    /// Returns true if the file was consumed (i.e. inserted as image or note).
+    fn handle_dropped_file(self: &Rc<Self>, file: &gio::File) -> bool {
+        let path = match file.path() {
+            Some(p) => p,
+            None => return false,
+        };
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+
+        if DROP_IMAGE_EXT.contains(&ext.as_str()) {
+            self.absorb_dropped_image(&path, &ext)
+        } else if DROP_TEXT_EXT.contains(&ext.as_str()) {
+            self.absorb_dropped_text(&path)
+        } else {
+            tracing::info!("ignoring drop with extension '{ext}': {}", path.display());
+            false
+        }
+    }
+
+    fn absorb_dropped_image(self: &Rc<Self>, source: &Path, ext: &str) -> bool {
+        if self.state.borrow().current_id.is_none() {
+            self.new_note();
+        }
+        let images = match images_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("images dir: {e}");
+                return false;
+            }
+        };
+        let dest = images.join(format!("{}.{}", uuid::Uuid::new_v4(), ext));
+        if let Err(e) = std::fs::copy(source, &dest) {
+            tracing::warn!("copy dropped image: {e}");
+            return false;
+        }
+        match gdk::Texture::from_filename(&dest) {
+            Ok(texture) => {
+                self.insert_image_at_cursor(&dest, &texture);
+                true
+            }
+            Err(e) => {
+                tracing::warn!("dropped image rejected by gdk: {e}");
+                let _ = std::fs::remove_file(&dest);
+                false
+            }
+        }
+    }
+
+    fn absorb_dropped_text(self: &Rc<Self>, source: &Path) -> bool {
+        let content = match std::fs::read_to_string(source) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("read dropped text: {e}");
+                return false;
+            }
+        };
+        // Use filename stem as a fallback title if the file's first non-empty
+        // line wouldn't make a useful one.
+        let stem = source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Note");
+        let body = if Note::derive_title(&content).is_empty() {
+            format!("{stem}\n\n{content}")
+        } else {
+            content
+        };
+        let note = match self.db.create_note() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!("create dropped note: {e}");
+                return false;
+            }
+        };
+        let id = note.id;
+        let title = Note::derive_title(&body);
+        if let Err(e) = self.db.update_note(id, &title, &body) {
+            tracing::error!("save dropped note: {e}");
+            return false;
+        }
+        let mut updated = note;
+        updated.title = title;
+        updated.body = body;
+        self.state.borrow_mut().notes.insert(0, updated);
+        self.rebuild_list();
+        self.select_note(id);
+        true
+    }
 }
 
 #[derive(Debug)]
 enum BodyPart {
     Text(String),
     Image(String),
+}
+
+/// Find every `http://...` / `https://...` run in `text`. Returns
+/// (char_offset, char_length) tuples, where offsets count Unicode scalars
+/// (matching `gtk::TextBuffer::iter_at_offset`).
+fn find_urls(text: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let prefix_len = url_prefix_len(&chars[i..]);
+        if prefix_len == 0 {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i + prefix_len;
+        while end < n && is_url_char(chars[end]) {
+            end += 1;
+        }
+        while end > start + prefix_len && is_trailing_punct(chars[end - 1]) {
+            end -= 1;
+        }
+        if end > start + prefix_len {
+            out.push((start, end - start));
+        }
+        i = end.max(i + 1);
+    }
+    out
+}
+
+fn url_prefix_len(chars: &[char]) -> usize {
+    if chars.starts_with(&['h', 't', 't', 'p', 's', ':', '/', '/']) {
+        8
+    } else if chars.starts_with(&['h', 't', 't', 'p', ':', '/', '/']) {
+        7
+    } else {
+        0
+    }
+}
+
+fn is_url_char(c: char) -> bool {
+    !c.is_whitespace() && !matches!(c, ')' | ']' | '<' | '>' | '"' | '\'' | '`')
+}
+
+fn is_trailing_punct(c: char) -> bool {
+    matches!(c, '.' | ',' | ';' | ':' | '!' | '?')
 }
 
 fn scale_to_fit(tex_w: i32, tex_h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
@@ -966,45 +1243,96 @@ fn app_subtitle() -> String {
     "floating notes".to_string()
 }
 
-fn build_note_row(note: &Note) -> gtk::ListBoxRow {
-    let row = gtk::ListBoxRow::new();
-    let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
+impl JotWindow {
+    fn build_note_row(self: &Rc<Self>, note: &Note) -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::new();
 
-    let title_text = note.display_title();
-    let title = gtk::Label::builder()
-        .label(&title_text)
-        .halign(gtk::Align::Start)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .lines(1)
-        .build();
-    title.add_css_class("jot-row-title");
+        // Outer = [text content (expand) | pin star]
+        let outer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 
-    let snippet_text = note.snippet();
-    let snippet = gtk::Label::builder()
-        .label(&snippet_text)
-        .halign(gtk::Align::Start)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .lines(1)
-        .build();
-    snippet.add_css_class("jot-row-snippet");
+        let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bx.set_hexpand(true);
 
-    let local: DateTime<Local> = note.updated_at.into();
-    let time = gtk::Label::builder()
-        .label(&format!("{}", local.format("%d %b · %H:%M")))
-        .halign(gtk::Align::Start)
-        .build();
-    time.add_css_class("jot-row-time");
+        let title_text = note.display_title();
+        let title = gtk::Label::builder()
+            .label(&title_text)
+            .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .lines(1)
+            .build();
+        title.add_css_class("jot-row-title");
 
-    bx.append(&title);
-    if !snippet_text.is_empty() {
-        bx.append(&snippet);
+        let snippet_text = note.snippet();
+        let snippet = gtk::Label::builder()
+            .label(&snippet_text)
+            .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .lines(1)
+            .build();
+        snippet.add_css_class("jot-row-snippet");
+
+        let local: DateTime<Local> = note.updated_at.into();
+        let time = gtk::Label::builder()
+            .label(&format!("{}", local.format("%d %b · %H:%M")))
+            .halign(gtk::Align::Start)
+            .build();
+        time.add_css_class("jot-row-time");
+
+        bx.append(&title);
+        if !snippet_text.is_empty() {
+            bx.append(&snippet);
+        }
+        bx.append(&time);
+
+        // Pin star — solid when pinned, hollow when not. Click toggles.
+        let icon_name = if note.pinned {
+            "starred-symbolic"
+        } else {
+            "non-starred-symbolic"
+        };
+        let pin_btn = gtk::Button::builder()
+            .icon_name(icon_name)
+            .has_frame(false)
+            .tooltip_text(if note.pinned { "Unpin" } else { "Pin to top" })
+            .valign(gtk::Align::Center)
+            .build();
+        pin_btn.add_css_class("jot-pin-btn");
+        if note.pinned {
+            pin_btn.add_css_class("jot-pin-active");
+        }
+        let win = self.clone();
+        let note_id = note.id;
+        let was_pinned = note.pinned;
+        pin_btn.connect_clicked(move |_| {
+            win.toggle_pin(note_id, !was_pinned);
+        });
+
+        outer.append(&bx);
+        outer.append(&pin_btn);
+        row.set_child(Some(&outer));
+
+        unsafe {
+            row.set_data("note-id", note.id);
+        }
+        row
     }
-    bx.append(&time);
-    row.set_child(Some(&bx));
 
-    let id = note.id;
-    unsafe {
-        row.set_data("note-id", id);
+    fn toggle_pin(self: &Rc<Self>, id: i64, pinned: bool) {
+        if let Err(e) = self.db.set_pinned(id, pinned) {
+            tracing::error!("set_pinned failed: {e}");
+            return;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(note) = state.notes.iter_mut().find(|n| n.id == id) {
+                note.pinned = pinned;
+            }
+            state.notes.sort_by(|a, b| {
+                b.pinned
+                    .cmp(&a.pinned)
+                    .then(b.updated_at.cmp(&a.updated_at))
+            });
+        }
+        self.rebuild_list();
     }
-    row
 }
