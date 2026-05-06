@@ -7,6 +7,7 @@ pub struct Note {
     pub body: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub pinned: bool,
 }
 
 impl Note {

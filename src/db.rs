@@ -17,20 +17,30 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial schema",
-    sql: "
-        CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL DEFAULT '',
-            body TEXT NOT NULL DEFAULT '',
-            created_at DATETIME NOT NULL,
-            updated_at DATETIME NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
-    ",
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial schema",
+        sql: "
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
+        ",
+    },
+    Migration {
+        version: 2,
+        name: "add pinned column",
+        sql: "
+            ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+            CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(pinned DESC, updated_at DESC);
+        ",
+    },
+];
 
 #[derive(Clone)]
 pub struct Db {
@@ -64,13 +74,16 @@ impl Db {
             body: String::new(),
             created_at: now,
             updated_at: now,
+            pinned: false,
         })
     }
 
     pub fn list_notes(&self) -> Result<Vec<Note>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, body, created_at, updated_at FROM notes ORDER BY updated_at DESC",
+            "SELECT id, title, body, created_at, updated_at, pinned
+             FROM notes
+             ORDER BY pinned DESC, updated_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Note {
@@ -79,9 +92,19 @@ impl Db {
                 body: row.get(2)?,
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
+                pinned: row.get::<_, i64>(5)? != 0,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute(
+            "UPDATE notes SET pinned=?1 WHERE id=?2",
+            params![if pinned { 1 } else { 0 }, id],
+        )?;
+        Ok(())
     }
 
     pub fn update_note(&self, id: i64, title: &str, body: &str) -> Result<()> {
@@ -103,8 +126,16 @@ impl Db {
     pub fn restore_note(&self, note: &Note) -> Result<()> {
         let conn = self.inner.lock().unwrap();
         conn.execute(
-            "INSERT INTO notes (id, title, body, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![note.id, note.title, note.body, note.created_at, note.updated_at],
+            "INSERT INTO notes (id, title, body, created_at, updated_at, pinned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                note.id,
+                note.title,
+                note.body,
+                note.created_at,
+                note.updated_at,
+                if note.pinned { 1 } else { 0 },
+            ],
         )?;
         Ok(())
     }

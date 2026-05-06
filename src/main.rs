@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod db;
+mod image_canvas;
 mod maintenance;
 mod note;
 mod window;
