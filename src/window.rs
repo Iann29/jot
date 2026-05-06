@@ -843,7 +843,7 @@ impl JotWindow {
     /// Load a markdown-style body into the buffer, replacing `![image](path)`
     /// references with inline Picture widgets while keeping the markdown text
     /// preserved under an invisible tag for round-trip persistence.
-    fn load_body_into_buffer(&self, body: &str) {
+    fn load_body_into_buffer(self: &Rc<Self>, body: &str) {
         self.buffer.set_text("");
         for part in parse_markdown_body(body) {
             match part {
@@ -859,7 +859,7 @@ impl JotWindow {
         self.refresh_url_tags();
     }
 
-    fn insert_image_part(&self, path_str: &str) {
+    fn insert_image_part(self: &Rc<Self>, path_str: &str) {
         let path = Path::new(path_str);
         match gdk::Texture::from_filename(path) {
             Ok(texture) => self.embed_image(path, &texture, /*with_newlines=*/ false),
@@ -872,7 +872,7 @@ impl JotWindow {
         }
     }
 
-    fn insert_image_at_cursor(&self, path: &Path, texture: &gdk::Texture) {
+    fn insert_image_at_cursor(self: &Rc<Self>, path: &Path, texture: &gdk::Texture) {
         // Drop a newline before the image if we're not on a fresh line, so
         // the image isn't squashed against existing text.
         let mark = self.buffer.get_insert();
@@ -885,20 +885,25 @@ impl JotWindow {
     }
 
     /// Insert image at the END of the buffer (used during body load).
-    fn embed_image(&self, path: &Path, texture: &gdk::Texture, with_newlines: bool) {
+    fn embed_image(self: &Rc<Self>, path: &Path, texture: &gdk::Texture, with_newlines: bool) {
         let mut iter = self.buffer.end_iter();
         self.embed_image_at_iter(&mut iter, path, texture, with_newlines);
     }
 
     /// Insert image at the current insert mark (used by paste).
-    fn embed_image_at_cursor(&self, path: &Path, texture: &gdk::Texture, with_newlines: bool) {
+    fn embed_image_at_cursor(
+        self: &Rc<Self>,
+        path: &Path,
+        texture: &gdk::Texture,
+        with_newlines: bool,
+    ) {
         let mark = self.buffer.get_insert();
         let mut iter = self.buffer.iter_at_mark(&mark);
         self.embed_image_at_iter(&mut iter, path, texture, with_newlines);
     }
 
     fn embed_image_at_iter(
-        &self,
+        self: &Rc<Self>,
         iter: &mut gtk::TextIter,
         path: &Path,
         texture: &gdk::Texture,
@@ -915,7 +920,22 @@ impl JotWindow {
         picture.set_size_request(w, h);
         picture.set_halign(gtk::Align::Start);
         picture.set_valign(gtk::Align::Start);
+        picture.set_cursor_from_name(Some("pointer"));
+        picture.set_tooltip_text(Some("Click to open larger preview"));
         self.text_view.add_child_at_anchor(&picture, &anchor);
+
+        // Click on the inline picture opens a preview dialog.
+        let click = gtk::GestureClick::new();
+        click.set_button(gdk::BUTTON_PRIMARY);
+        let win = self.clone();
+        let tex_for_preview = texture.clone();
+        click.connect_pressed(move |gesture, n_press, _, _| {
+            if n_press == 1 {
+                win.show_image_preview(&tex_for_preview);
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+            }
+        });
+        picture.add_controller(click);
 
         // 2. Invisible markdown reference (so the body round-trips). After
         // creating the anchor, `iter` has advanced past it — re-fetch via
@@ -931,6 +951,35 @@ impl JotWindow {
         let start = self.buffer.iter_at_offset(after_anchor);
         let end = self.buffer.iter_at_offset(after_anchor + md.chars().count() as i32);
         self.buffer.apply_tag(&self.image_tag, &start, &end);
+    }
+
+    fn show_image_preview(self: &Rc<Self>, texture: &gdk::Texture) {
+        let dialog = adw::Dialog::builder()
+            .content_width(960)
+            .content_height(720)
+            .can_close(true)
+            .title("")
+            .build();
+        dialog.add_css_class("jot-image-preview");
+
+        let picture = gtk::Picture::for_paintable(texture);
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.set_vexpand(true);
+        picture.set_hexpand(true);
+        picture.add_css_class("jot-preview-image");
+
+        let header = adw::HeaderBar::builder()
+            .title_widget(&gtk::Label::builder().label("Image preview").build())
+            .build();
+        header.add_css_class("jot-headerbar");
+
+        let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bx.append(&header);
+        bx.append(&picture);
+
+        dialog.set_child(Some(&bx));
+        dialog.present(Some(&self.window));
     }
 
     /// Extract the body for persistence — `text()` with `include_hidden=true`
