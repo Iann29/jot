@@ -1,6 +1,6 @@
 [package]
 name = "jot"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Lightning-fast floating notes for tiling Wayland compositors"
 license = "MIT"
