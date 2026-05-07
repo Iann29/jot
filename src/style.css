@@ -232,6 +232,23 @@ window.jot-window > contents {
     background-position: 0 0, 0 12px, 12px -12px, -12px 0;
 }
 
+/* Mic button — recording state pulses red */
+.jot-mic-recording {
+    background: alpha(#ff5470, 0.18);
+    color: #ff5470;
+    border-color: alpha(#ff5470, 0.4);
+    animation: jot-mic-pulse 1.4s ease-in-out infinite;
+}
+@keyframes jot-mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 alpha(#ff5470, 0.4); }
+    50%      { box-shadow: 0 0 0 6px alpha(#ff5470, 0.0); }
+}
+.jot-mic-listening {
+    color: #ff5470;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+}
+
 /* Pin star in note rows */
 .jot-pin-btn {
     background: transparent;

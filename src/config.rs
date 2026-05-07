@@ -10,6 +10,7 @@ pub struct Config {
     pub height: i32,
     pub font_size: u32,
     pub theme: Theme,
+    pub soniox_api_key: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,6 +29,7 @@ impl Default for Config {
             height: 620,
             font_size: 15,
             theme: Theme::Dark,
+            soniox_api_key: String::new(),
         }
     }
 }

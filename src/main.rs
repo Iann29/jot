@@ -4,6 +4,7 @@ mod db;
 mod image_canvas;
 mod maintenance;
 mod note;
+mod transcribe;
 mod window;
 
 use gtk::glib;
