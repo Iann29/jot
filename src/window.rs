@@ -13,14 +13,13 @@ use crate::db::{images_dir, Db};
 use crate::image_canvas::ImageCanvas;
 use crate::maintenance;
 use crate::note::Note;
-use crate::transcribe::{self, TranscriptCmd, TranscriptEvent, TranscriptionHandle};
+use crate::transcribe::{TranscriptCmd, TranscriptEvent, TranscriptionHandle};
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
 const UNDO_STACK_LIMIT: usize = 25;
 const TEXT_UNDO_LIMIT: usize = 80;
 const IMAGE_TAG_NAME: &str = "jot-image";
 const URL_TAG_NAME: &str = "jot-url";
-const TENTATIVE_TAG_NAME: &str = "jot-tentative";
 const IMAGE_MAX_W: i32 = 400;
 const IMAGE_MAX_H: i32 = 260;
 const DROP_TEXT_EXT: &[&str] = &["md", "markdown", "txt"];
@@ -34,7 +33,6 @@ pub struct JotWindow {
     buffer: gtk::TextBuffer,
     image_tag: gtk::TextTag,
     url_tag: gtk::TextTag,
-    tentative_tag: gtk::TextTag,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
@@ -48,7 +46,23 @@ pub struct JotWindow {
     pointer_pos: Cell<Option<(f64, f64)>>,
     ctrl_held: Cell<bool>,
     transcribe: RefCell<Option<TranscriptionHandle>>,
-    tentative_marks: RefCell<Option<(gtk::TextMark, gtk::TextMark)>>,
+    /// State of the live voice session — pending chunks waiting for
+    /// transcription, plus a TextMark anchored where text should land.
+    voice_state: RefCell<Option<VoiceSession>>,
+}
+
+/// Tracks a single live voice-input session.
+struct VoiceSession {
+    /// Where in the buffer transcripts should be inserted. Has right
+    /// gravity so the user can keep typing in front of incoming text.
+    insert_mark: gtk::TextMark,
+    /// Sequence number → received text (or `None` if still in flight).
+    /// Insertion happens in seq order, so out-of-order responses queue.
+    pending: std::collections::BTreeMap<u64, Option<String>>,
+    /// Next seq number we expect to write into the buffer.
+    next_to_emit: u64,
+    /// True once Recording event arrived; UI can flip cursor / status.
+    started: bool,
 }
 
 struct State {
@@ -96,7 +110,7 @@ impl JotWindow {
 
         let mic_btn = gtk::Button::builder()
             .icon_name("audio-input-microphone-symbolic")
-            .tooltip_text("Voice transcription (Soniox)")
+            .tooltip_text("Voice transcription (Groq Whisper)")
             .build();
         mic_btn.add_css_class("jot-mic-btn");
 
@@ -179,16 +193,6 @@ impl JotWindow {
             .build();
         buffer.tag_table().add(&url_tag);
 
-        // "Tentative" tag — applied to provisional (non-final) transcript
-        // tokens. Replaced on every Soniox message; finalised tokens lose
-        // the tag and become normal editor text.
-        let tentative_tag = gtk::TextTag::builder()
-            .name(TENTATIVE_TAG_NAME)
-            .foreground("#9aa9ff")
-            .style(gtk::pango::Style::Italic)
-            .build();
-        buffer.tag_table().add(&tentative_tag);
-
         let text_view = gtk::TextView::builder()
             .buffer(&buffer)
             .wrap_mode(gtk::WrapMode::WordChar)
@@ -258,7 +262,6 @@ impl JotWindow {
             buffer: buffer.clone(),
             image_tag,
             url_tag,
-            tentative_tag,
             title_label,
             subtitle_label,
             placeholder,
@@ -279,7 +282,7 @@ impl JotWindow {
             pointer_pos: Cell::new(None),
             ctrl_held: Cell::new(false),
             transcribe: RefCell::new(None),
-            tentative_marks: RefCell::new(None),
+            voice_state: RefCell::new(None),
         });
 
         // Wire callbacks
@@ -628,13 +631,13 @@ impl JotWindow {
         let voice = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
         let voice_title = gtk::Label::builder()
-            .label("Soniox real-time STT")
+            .label("Groq Whisper Large v3 Turbo")
             .halign(gtk::Align::Start)
             .build();
         voice_title.add_css_class("jot-title");
 
         let voice_blurb = gtk::Label::builder()
-            .label("Click the mic in the header to dictate. Tokens stream in live; non-final tokens render in italics until the model commits.")
+            .label("Click the mic in the header to dictate. Speech is split at natural pauses and transcribed by Whisper on Groq (~216× real-time).")
             .halign(gtk::Align::Start)
             .wrap(true)
             .max_width_chars(38)
@@ -642,19 +645,17 @@ impl JotWindow {
         voice_blurb.add_css_class("jot-row-snippet");
 
         let key_label = gtk::Label::builder()
-            .label("API key")
+            .label("Groq API key")
             .halign(gtk::Align::Start)
             .build();
         let key_entry = gtk::PasswordEntry::builder()
             .show_peek_icon(true)
-            .placeholder_text("paste your Soniox API key")
+            .placeholder_text("paste your Groq API key (gsk_…)")
             .build();
-        key_entry.set_text(&self.state.borrow().config.soniox_api_key);
+        key_entry.set_text(&self.state.borrow().config.groq_api_key);
         key_entry.add_css_class("jot-search");
         key_entry.set_hexpand(true);
 
-        // Save button — explicit save so the key persists even if the user
-        // never closes the window through `connect_close_request`.
         let save_btn = gtk::Button::builder()
             .label("Save")
             .tooltip_text("Save and persist to ~/.config/jot/config.toml")
@@ -666,11 +667,23 @@ impl JotWindow {
         key_row.append(&save_btn);
 
         let key_link = gtk::LinkButton::builder()
-            .label("Get one at console.soniox.com")
-            .uri("https://console.soniox.com")
+            .label("Get one at console.groq.com/keys")
+            .uri("https://console.groq.com/keys")
             .halign(gtk::Align::Start)
             .build();
         key_link.add_css_class("jot-row-time");
+
+        // Optional language hint — empty string means "let Whisper auto-detect".
+        let lang_label = gtk::Label::builder()
+            .label("Language hint (ISO-639-1, blank = auto)")
+            .halign(gtk::Align::Start)
+            .build();
+        let lang_entry = gtk::Entry::builder()
+            .placeholder_text("pt, en, es … (blank for auto)")
+            .max_length(8)
+            .build();
+        lang_entry.set_text(&self.state.borrow().config.transcribe_language);
+        lang_entry.add_css_class("jot-search");
 
         let key_note = gtk::Label::builder()
             .label("Stored in plain text at ~/.config/jot/config.toml.")
@@ -685,21 +698,28 @@ impl JotWindow {
         let win = self.clone();
         key_entry.connect_changed(move |entry| {
             let v = entry.text().to_string();
-            win.state.borrow_mut().config.soniox_api_key = v;
+            win.state.borrow_mut().config.groq_api_key = v;
             win.update_mic_button_state();
         });
-
-        // Save commits the current config (including the API key) to disk
-        // and surfaces a toast so the user knows it took.
         let win = self.clone();
-        let entry_for_save = key_entry.clone();
+        lang_entry.connect_changed(move |entry| {
+            let v = entry.text().to_string();
+            win.state.borrow_mut().config.transcribe_language = v;
+        });
+
+        let win = self.clone();
+        let key_entry_for_save = key_entry.clone();
+        let lang_entry_for_save = lang_entry.clone();
         save_btn.connect_clicked(move |_| {
-            let value = entry_for_save.text().to_string();
-            win.state.borrow_mut().config.soniox_api_key = value;
+            {
+                let mut state = win.state.borrow_mut();
+                state.config.groq_api_key = key_entry_for_save.text().to_string();
+                state.config.transcribe_language = lang_entry_for_save.text().to_string();
+            }
             let result = win.state.borrow().config.save();
             let toast = match result {
                 Ok(()) => adw::Toast::builder()
-                    .title("API key saved")
+                    .title("Voice settings saved")
                     .timeout(2)
                     .build(),
                 Err(e) => adw::Toast::builder()
@@ -716,6 +736,8 @@ impl JotWindow {
         voice.append(&key_label);
         voice.append(&key_row);
         voice.append(&key_link);
+        voice.append(&lang_label);
+        voice.append(&lang_entry);
         voice.append(&key_note);
 
         stack.add_titled(&appearance, Some("appearance"), "Appearance");
@@ -1563,15 +1585,37 @@ impl JotWindow {
         self.transcribe.borrow().is_some()
     }
 
+    fn pending_chunk_count(&self) -> usize {
+        self.voice_state
+            .borrow()
+            .as_ref()
+            .map(|s| s.pending.values().filter(|v| v.is_none()).count())
+            .unwrap_or(0)
+    }
+
     fn update_mic_button_state(&self) {
-        let has_key = !self.state.borrow().config.soniox_api_key.trim().is_empty();
+        let has_key = !self.state.borrow().config.groq_api_key.trim().is_empty();
         let active = self.voice_active();
+        let started = self
+            .voice_state
+            .borrow()
+            .as_ref()
+            .map(|s| s.started)
+            .unwrap_or(false);
         self.mic_btn.set_sensitive(has_key);
         if active {
             self.mic_btn.add_css_class("jot-mic-recording");
             self.mic_btn.set_icon_name("media-playback-stop-symbolic");
             self.mic_btn.set_tooltip_text(Some("Stop transcription"));
-            self.subtitle_label.set_text("● Listening…");
+            let pending = self.pending_chunk_count();
+            let label = if !started {
+                "● Connecting…".to_string()
+            } else if pending > 0 {
+                format!("● Recording  ·  {pending} chunk(s) in flight")
+            } else {
+                "● Recording".to_string()
+            };
+            self.subtitle_label.set_text(&label);
             self.subtitle_label.add_css_class("jot-mic-listening");
         } else {
             self.mic_btn.remove_css_class("jot-mic-recording");
@@ -1580,7 +1624,7 @@ impl JotWindow {
             self.mic_btn.set_tooltip_text(Some(if has_key {
                 "Start voice transcription"
             } else {
-                "Set your Soniox API key in Settings → Voice"
+                "Set your Groq API key in Settings → Voice"
             }));
             self.subtitle_label.remove_css_class("jot-mic-listening");
         }
@@ -1595,26 +1639,53 @@ impl JotWindow {
     }
 
     fn voice_start(self: &Rc<Self>) {
-        let api_key = self.state.borrow().config.soniox_api_key.trim().to_string();
+        let api_key = self.state.borrow().config.groq_api_key.trim().to_string();
         if api_key.is_empty() {
             let toast = adw::Toast::builder()
-                .title("Set your Soniox API key in Settings → Voice first")
+                .title("Set your Groq API key in Settings → Voice first")
                 .timeout(4)
                 .build();
             self.toast_overlay.add_toast(toast);
             return;
         }
-        // Need a note to write into.
         if self.state.borrow().current_id.is_none() {
             self.new_note();
         }
 
-        let (handle, evt_rx) = transcribe::start(api_key);
+        let language = {
+            let l = self.state.borrow().config.transcribe_language.clone();
+            let trimmed = l.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        };
+
+        let (handle, evt_rx) = crate::transcribe::start(api_key, language);
         *self.transcribe.borrow_mut() = Some(handle);
 
-        // Plant the tentative cursor at the current insert position so
-        // streaming tokens land where the user expects.
-        self.plant_tentative_marks();
+        // Anchor where transcripts will land — at the current cursor, with
+        // right gravity so the user can keep typing in front and the mark
+        // moves with the text behind them.
+        let cursor = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        // Make sure we start on a fresh line if the cursor is mid-sentence,
+        // so the first chunk doesn't stitch into existing words.
+        if !cursor.starts_line() {
+            self.suppress.set(true);
+            let mut iter = self.buffer.iter_at_mark(&self.buffer.get_insert());
+            self.buffer.insert(&mut iter, "\n");
+            self.suppress.set(false);
+        }
+        let cursor = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        let insert_mark = self.buffer.create_mark(None, &cursor, false);
+
+        *self.voice_state.borrow_mut() = Some(VoiceSession {
+            insert_mark,
+            pending: std::collections::BTreeMap::new(),
+            next_to_emit: 0,
+            started: false,
+        });
         self.update_mic_button_state();
 
         let win = self.clone();
@@ -1627,7 +1698,6 @@ impl JotWindow {
 
     fn voice_stop(&self) {
         if let Some(handle) = self.transcribe.borrow().as_ref() {
-            // Send Stop; tokio side will close audio + flush WS.
             let tx = handle.cmd_tx.clone();
             glib::spawn_future_local(async move {
                 let _ = tx.send(TranscriptCmd::Stop).await;
@@ -1637,106 +1707,94 @@ impl JotWindow {
 
     fn handle_voice_event(self: &Rc<Self>, evt: TranscriptEvent) {
         match evt {
-            TranscriptEvent::Connected => {
-                tracing::info!("voice: connected");
+            TranscriptEvent::Recording => {
+                if let Some(s) = self.voice_state.borrow_mut().as_mut() {
+                    s.started = true;
+                }
+                self.update_mic_button_state();
+                tracing::info!("voice: recording");
             }
-            TranscriptEvent::Tokens(batch) => {
-                self.voice_apply_tokens(&batch);
+            TranscriptEvent::ChunkPending { seq } => {
+                if let Some(s) = self.voice_state.borrow_mut().as_mut() {
+                    s.pending.entry(seq).or_insert(None);
+                }
+                self.update_mic_button_state();
+            }
+            TranscriptEvent::Chunk { seq, text } => {
+                if let Some(s) = self.voice_state.borrow_mut().as_mut() {
+                    s.pending.insert(seq, Some(text));
+                }
+                self.voice_drain_ready();
+                self.update_mic_button_state();
             }
             TranscriptEvent::Finished => {
-                self.voice_finalise(/*as_error=*/ None);
+                self.voice_drain_ready();
+                self.voice_finalise(None);
             }
             TranscriptEvent::Error(msg) => {
                 tracing::warn!("voice: {msg}");
+                self.voice_drain_ready();
                 self.voice_finalise(Some(msg));
             }
         }
     }
 
-    fn plant_tentative_marks(&self) {
-        // Drop any leftover marks first.
-        if let Some((s, e)) = self.tentative_marks.borrow_mut().take() {
-            self.buffer.delete_mark(&s);
-            self.buffer.delete_mark(&e);
-        }
-        let cursor = self.buffer.iter_at_mark(&self.buffer.get_insert());
-        // Left-gravity start, right-gravity end. As text is inserted
-        // between them, the start sticks to the left and the end drifts
-        // right with the new content.
-        let start = self.buffer.create_mark(None, &cursor, true);
-        let end = self.buffer.create_mark(None, &cursor, false);
-        *self.tentative_marks.borrow_mut() = Some((start, end));
-    }
+    /// Pull every transcript that's ready in seq order and stitch it into
+    /// the buffer at `insert_mark`. Stops at the first hole — keeps spoken
+    /// order even when HTTP responses come back out of order.
+    fn voice_drain_ready(self: &Rc<Self>) {
+        loop {
+            let ready_text = {
+                let mut state = self.voice_state.borrow_mut();
+                let Some(state) = state.as_mut() else { return };
+                let next = state.next_to_emit;
+                match state.pending.get(&next) {
+                    Some(Some(_)) => {
+                        let text = state.pending.remove(&next).unwrap().unwrap();
+                        state.next_to_emit += 1;
+                        text
+                    }
+                    _ => return,
+                }
+            };
 
-    fn voice_apply_tokens(self: &Rc<Self>, tokens: &[transcribe::Token]) {
-        let (start_mark, end_mark) = match self.tentative_marks.borrow().clone() {
-            Some(m) => m,
-            None => return,
-        };
-
-        // Split the batch: newly-final tokens (append before the tentative
-        // region) vs current tentative state (replaces the previous one).
-        let mut finals = String::new();
-        let mut tentatives = String::new();
-        for t in tokens {
-            if t.is_final {
-                finals.push_str(&t.text);
-            } else {
-                tentatives.push_str(&t.text);
+            // Whisper sometimes returns leading whitespace; collapse it.
+            let trimmed = ready_text.trim();
+            if trimmed.is_empty() {
+                continue;
             }
+
+            let mark = match self.voice_state.borrow().as_ref() {
+                Some(s) => s.insert_mark.clone(),
+                None => return,
+            };
+
+            self.suppress.set(true);
+            let mut iter = self.buffer.iter_at_mark(&mark);
+            // Add a single space between consecutive utterances so they
+            // don't run together, but skip the leading space at the very
+            // start of the session.
+            let need_separator = iter.offset() > 0
+                && iter
+                    .clone()
+                    .backward_char()
+                    .then(|| iter.char())
+                    .map(|c| c != ' ' && c != '\n')
+                    .unwrap_or(false);
+            if need_separator {
+                self.buffer.insert(&mut iter, " ");
+            }
+            self.buffer.insert(&mut iter, trimmed);
+            self.suppress.set(false);
+
+            self.update_placeholder();
+            self.schedule_autosave();
         }
-
-        self.suppress.set(true);
-
-        // 1. Wipe the existing tentative region.
-        let mut s = self.buffer.iter_at_mark(&start_mark);
-        let mut e = self.buffer.iter_at_mark(&end_mark);
-        if s.offset() != e.offset() {
-            self.buffer.delete(&mut s, &mut e);
-        }
-
-        // 2. Insert the new finals at start_mark — they stay because the
-        //    mark has left-gravity (won't drift past the inserted text).
-        if !finals.is_empty() {
-            let mut s = self.buffer.iter_at_mark(&start_mark);
-            self.buffer.insert(&mut s, &finals);
-            // Now move start_mark forward by the inserted length so the
-            // next tentative wipe doesn't eat these finalised words.
-            let new_pos = self.buffer.iter_at_mark(&start_mark);
-            self.buffer.move_mark(&start_mark, &new_pos);
-        }
-
-        // 3. Insert the new tentatives at end_mark with the tentative tag.
-        if !tentatives.is_empty() {
-            let mut e = self.buffer.iter_at_mark(&end_mark);
-            let start_offset = e.offset();
-            self.buffer.insert(&mut e, &tentatives);
-            let s = self.buffer.iter_at_offset(start_offset);
-            let e = self.buffer.iter_at_mark(&end_mark);
-            self.buffer.apply_tag(&self.tentative_tag, &s, &e);
-        } else {
-            // Keep end_mark sitting at start_mark when there are no
-            // tentatives, so the next batch's finals/tentatives line up.
-            let pos = self.buffer.iter_at_mark(&start_mark);
-            self.buffer.move_mark(&end_mark, &pos);
-        }
-
-        self.suppress.set(false);
-
-        // Trigger autosave + URL highlight refresh as if the user typed.
-        self.update_placeholder();
-        self.schedule_autosave();
     }
 
     fn voice_finalise(self: &Rc<Self>, error: Option<String>) {
-        // Convert any leftover tentative text to plain text (drop the tag),
-        // collapse the marks, and clear the handle.
-        if let Some((start_mark, end_mark)) = self.tentative_marks.borrow_mut().take() {
-            let s = self.buffer.iter_at_mark(&start_mark);
-            let e = self.buffer.iter_at_mark(&end_mark);
-            self.buffer.remove_tag(&self.tentative_tag, &s, &e);
-            self.buffer.delete_mark(&start_mark);
-            self.buffer.delete_mark(&end_mark);
+        if let Some(state) = self.voice_state.borrow_mut().take() {
+            self.buffer.delete_mark(&state.insert_mark);
         }
         *self.transcribe.borrow_mut() = None;
         self.update_mic_button_state();

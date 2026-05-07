@@ -33,11 +33,5 @@ fn main() -> glib::ExitCode {
         eprintln!("{bt}");
     }));
 
-    // rustls 0.23 dropped the auto-installed default CryptoProvider — any
-    // ClientConfig::builder() now panics unless we install one explicitly.
-    // Use ring (the default historical choice). Idempotent: install_default
-    // returns Err if something else got there first; ignore that.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     app::run()
 }

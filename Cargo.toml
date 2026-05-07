@@ -27,14 +27,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 uuid = { version = "1", features = ["v4"] }
 
-# Voice transcription stack
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
-tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
-# rustls 0.23+ requires the consumer to install a CryptoProvider explicitly;
-# pull it in here so we can call `install_default()` once at startup.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Voice transcription stack — Groq Whisper Large v3 Turbo, VAD-chunked.
+# cpal captures continuously; a small RMS-based voice-activity detector
+# slices speech into utterance-shaped chunks at silences; reqwest POSTs
+# each chunk as multipart/form-data to Groq, which transcribes at
+# ~216× real-time, so the perceived latency is ~one short pause.
 cpal = "0.16"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking"] }
 async-channel = "2"
 serde_json = "1"
 
