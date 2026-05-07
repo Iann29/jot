@@ -30,6 +30,9 @@ uuid = { version = "1", features = ["v4"] }
 # Voice transcription stack
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+# rustls 0.23+ requires the consumer to install a CryptoProvider explicitly;
+# pull it in here so we can call `install_default()` once at startup.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 cpal = "0.16"
 async-channel = "2"
@@ -41,3 +44,10 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Mirror release optimisation but keep debug symbols, so we can resolve
+# panic backtraces with addr2line when something blows up in the wild.
+[profile.release-debug]
+inherits = "release"
+strip = false
+debug = "line-tables-only"

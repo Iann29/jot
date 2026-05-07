@@ -651,13 +651,19 @@ impl JotWindow {
             .build();
         key_entry.set_text(&self.state.borrow().config.soniox_api_key);
         key_entry.add_css_class("jot-search");
+        key_entry.set_hexpand(true);
 
-        let win = self.clone();
-        key_entry.connect_changed(move |entry| {
-            let v = entry.text().to_string();
-            win.state.borrow_mut().config.soniox_api_key = v;
-            win.update_mic_button_state();
-        });
+        // Save button — explicit save so the key persists even if the user
+        // never closes the window through `connect_close_request`.
+        let save_btn = gtk::Button::builder()
+            .label("Save")
+            .tooltip_text("Save and persist to ~/.config/jot/config.toml")
+            .build();
+        save_btn.add_css_class("jot-accent");
+
+        let key_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        key_row.append(&key_entry);
+        key_row.append(&save_btn);
 
         let key_link = gtk::LinkButton::builder()
             .label("Get one at console.soniox.com")
@@ -674,10 +680,41 @@ impl JotWindow {
             .build();
         key_note.add_css_class("jot-row-time");
 
+        // Live state update on every keystroke (so the mic button enables
+        // immediately as you paste). Disk persistence happens on Save.
+        let win = self.clone();
+        key_entry.connect_changed(move |entry| {
+            let v = entry.text().to_string();
+            win.state.borrow_mut().config.soniox_api_key = v;
+            win.update_mic_button_state();
+        });
+
+        // Save commits the current config (including the API key) to disk
+        // and surfaces a toast so the user knows it took.
+        let win = self.clone();
+        let entry_for_save = key_entry.clone();
+        save_btn.connect_clicked(move |_| {
+            let value = entry_for_save.text().to_string();
+            win.state.borrow_mut().config.soniox_api_key = value;
+            let result = win.state.borrow().config.save();
+            let toast = match result {
+                Ok(()) => adw::Toast::builder()
+                    .title("API key saved")
+                    .timeout(2)
+                    .build(),
+                Err(e) => adw::Toast::builder()
+                    .title(&format!("Could not save: {e}"))
+                    .timeout(5)
+                    .build(),
+            };
+            win.toast_overlay.add_toast(toast);
+            win.update_mic_button_state();
+        });
+
         voice.append(&voice_title);
         voice.append(&voice_blurb);
         voice.append(&key_label);
-        voice.append(&key_entry);
+        voice.append(&key_row);
         voice.append(&key_link);
         voice.append(&key_note);
 

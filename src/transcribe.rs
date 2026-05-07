@@ -120,10 +120,29 @@ struct ServerMessage {
     tokens: Vec<ServerToken>,
     #[serde(default)]
     finished: bool,
+    // Soniox sends `error_code` as either a string (e.g. "INVALID_API_KEY")
+    // or an integer HTTP-style status (e.g. 401). Accept both with an
+    // untagged enum and stringify on consumption.
     #[serde(default)]
-    error_code: Option<String>,
+    error_code: Option<ErrorCode>,
     #[serde(default)]
     error_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ErrorCode {
+    String(String),
+    Number(i64),
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErrorCode::String(s) => f.write_str(s),
+            ErrorCode::Number(n) => write!(f, "{n}"),
+        }
+    }
 }
 
 async fn run_session(
@@ -244,7 +263,7 @@ async fn run_session(
                 };
                 if let Some(code) = parsed.error_code {
                     let detail = parsed.error_message.unwrap_or_default();
-                    break Err(anyhow!("Soniox error {code}: {detail}"));
+                    break Err(anyhow!("Soniox {code}: {detail}"));
                 }
                 if !parsed.tokens.is_empty() {
                     let batch: Vec<Token> = parsed
