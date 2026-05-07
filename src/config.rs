@@ -10,6 +10,13 @@ pub struct Config {
     pub height: i32,
     pub font_size: u32,
     pub theme: Theme,
+    /// API key for the Groq speech-to-text endpoint
+    /// (https://console.groq.com/keys).
+    #[serde(alias = "soniox_api_key")]
+    pub groq_api_key: String,
+    /// Optional ISO-639-1 language hint (e.g. "pt", "en"). Empty string
+    /// means let Whisper auto-detect.
+    pub transcribe_language: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,6 +35,8 @@ impl Default for Config {
             height: 620,
             font_size: 15,
             theme: Theme::Dark,
+            groq_api_key: String::new(),
+            transcribe_language: String::new(),
         }
     }
 }

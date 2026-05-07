@@ -13,6 +13,7 @@ use crate::db::{images_dir, Db};
 use crate::image_canvas::ImageCanvas;
 use crate::maintenance;
 use crate::note::Note;
+use crate::transcribe::{TranscriptCmd, TranscriptEvent, TranscriptionHandle};
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
 const UNDO_STACK_LIMIT: usize = 25;
@@ -36,6 +37,7 @@ pub struct JotWindow {
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
     search_entry: gtk::SearchEntry,
+    mic_btn: gtk::Button,
     toast_overlay: adw::ToastOverlay,
     opacity_provider: gtk::CssProvider,
     state: RefCell<State>,
@@ -43,6 +45,24 @@ pub struct JotWindow {
     autosave: RefCell<Option<glib::SourceId>>,
     pointer_pos: Cell<Option<(f64, f64)>>,
     ctrl_held: Cell<bool>,
+    transcribe: RefCell<Option<TranscriptionHandle>>,
+    /// State of the live voice session — pending chunks waiting for
+    /// transcription, plus a TextMark anchored where text should land.
+    voice_state: RefCell<Option<VoiceSession>>,
+}
+
+/// Tracks a single live voice-input session.
+struct VoiceSession {
+    /// Where in the buffer transcripts should be inserted. Has right
+    /// gravity so the user can keep typing in front of incoming text.
+    insert_mark: gtk::TextMark,
+    /// Sequence number → received text (or `None` if still in flight).
+    /// Insertion happens in seq order, so out-of-order responses queue.
+    pending: std::collections::BTreeMap<u64, Option<String>>,
+    /// Next seq number we expect to write into the buffer.
+    next_to_emit: u64,
+    /// True once Recording event arrived; UI can flip cursor / status.
+    started: bool,
 }
 
 struct State {
@@ -88,6 +108,12 @@ impl JotWindow {
             .build();
         new_btn.add_css_class("jot-accent");
 
+        let mic_btn = gtk::Button::builder()
+            .icon_name("audio-input-microphone-symbolic")
+            .tooltip_text("Voice transcription (Groq Whisper)")
+            .build();
+        mic_btn.add_css_class("jot-mic-btn");
+
         let delete_btn = gtk::Button::builder()
             .icon_name("user-trash-symbolic")
             .tooltip_text("Delete current note  ·  Ctrl+D")
@@ -104,6 +130,7 @@ impl JotWindow {
             .build();
 
         header.pack_start(&new_btn);
+        header.pack_start(&mic_btn);
         header.pack_end(&close_btn);
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
@@ -239,6 +266,7 @@ impl JotWindow {
             subtitle_label,
             placeholder,
             search_entry: search_entry.clone(),
+            mic_btn: mic_btn.clone(),
             toast_overlay: toast_overlay.clone(),
             opacity_provider,
             state: RefCell::new(State {
@@ -253,6 +281,8 @@ impl JotWindow {
             autosave: RefCell::new(None),
             pointer_pos: Cell::new(None),
             ctrl_held: Cell::new(false),
+            transcribe: RefCell::new(None),
+            voice_state: RefCell::new(None),
         });
 
         // Wire callbacks
@@ -263,6 +293,7 @@ impl JotWindow {
         this.install_drop_target();
         this.apply_opacity();
         this.refresh_notes();
+        this.update_mic_button_state();
 
         // If there are notes, select the first; otherwise show placeholder
         let first_id = {
@@ -318,6 +349,12 @@ impl JotWindow {
         // New note
         let win = self.clone();
         new_btn.connect_clicked(move |_| win.new_note());
+
+        // Mic — toggles voice transcription.
+        // Note: the actual `mic_btn` we wire here is the cloned reference
+        // owned by `self`; the parameter argument is only used for layout.
+        let win = self.clone();
+        self.mic_btn.connect_clicked(move |_| win.toggle_voice());
 
         // Delete
         let win = self.clone();
@@ -537,7 +574,12 @@ impl JotWindow {
         let popover = gtk::Popover::new();
         popover.add_css_class("jot-settings");
 
-        let container = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let stack = gtk::Stack::new();
+        stack.set_transition_type(gtk::StackTransitionType::SlideLeftRight);
+        stack.set_hexpand(true);
+
+        // ── Appearance tab ──────────────────────────────────────────────
+        let appearance = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
         let opacity_label = gtk::Label::builder()
             .label("Window opacity")
@@ -548,7 +590,6 @@ impl JotWindow {
         opacity_scale.set_value(opacity);
         opacity_scale.set_hexpand(true);
         opacity_scale.set_draw_value(false);
-
         let win = self.clone();
         opacity_scale.connect_value_changed(move |scale| {
             let v = scale.value();
@@ -566,7 +607,6 @@ impl JotWindow {
         font_scale.set_hexpand(true);
         font_scale.set_draw_value(true);
         font_scale.set_value_pos(gtk::PositionType::Right);
-
         let win = self.clone();
         font_scale.connect_value_changed(move |scale| {
             let v = scale.value() as u32;
@@ -581,11 +621,135 @@ impl JotWindow {
         hint.add_css_class("jot-row-time");
         hint.set_margin_top(6);
 
-        container.append(&opacity_label);
-        container.append(&opacity_scale);
-        container.append(&font_label);
-        container.append(&font_scale);
-        container.append(&hint);
+        appearance.append(&opacity_label);
+        appearance.append(&opacity_scale);
+        appearance.append(&font_label);
+        appearance.append(&font_scale);
+        appearance.append(&hint);
+
+        // ── Voice tab ──────────────────────────────────────────────────
+        let voice = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+        let voice_title = gtk::Label::builder()
+            .label("Groq Whisper Large v3 Turbo")
+            .halign(gtk::Align::Start)
+            .build();
+        voice_title.add_css_class("jot-title");
+
+        let voice_blurb = gtk::Label::builder()
+            .label("Click the mic in the header to dictate. Speech is split at natural pauses and transcribed by Whisper on Groq (~216× real-time).")
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        voice_blurb.add_css_class("jot-row-snippet");
+
+        let key_label = gtk::Label::builder()
+            .label("Groq API key")
+            .halign(gtk::Align::Start)
+            .build();
+        let key_entry = gtk::PasswordEntry::builder()
+            .show_peek_icon(true)
+            .placeholder_text("paste your Groq API key (gsk_…)")
+            .build();
+        key_entry.set_text(&self.state.borrow().config.groq_api_key);
+        key_entry.add_css_class("jot-search");
+        key_entry.set_hexpand(true);
+
+        let save_btn = gtk::Button::builder()
+            .label("Save")
+            .tooltip_text("Save and persist to ~/.config/jot/config.toml")
+            .build();
+        save_btn.add_css_class("jot-accent");
+
+        let key_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        key_row.append(&key_entry);
+        key_row.append(&save_btn);
+
+        let key_link = gtk::LinkButton::builder()
+            .label("Get one at console.groq.com/keys")
+            .uri("https://console.groq.com/keys")
+            .halign(gtk::Align::Start)
+            .build();
+        key_link.add_css_class("jot-row-time");
+
+        // Optional language hint — empty string means "let Whisper auto-detect".
+        let lang_label = gtk::Label::builder()
+            .label("Language hint (ISO-639-1, blank = auto)")
+            .halign(gtk::Align::Start)
+            .build();
+        let lang_entry = gtk::Entry::builder()
+            .placeholder_text("pt, en, es … (blank for auto)")
+            .max_length(8)
+            .build();
+        lang_entry.set_text(&self.state.borrow().config.transcribe_language);
+        lang_entry.add_css_class("jot-search");
+
+        let key_note = gtk::Label::builder()
+            .label("Stored in plain text at ~/.config/jot/config.toml.")
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        key_note.add_css_class("jot-row-time");
+
+        // Live state update on every keystroke (so the mic button enables
+        // immediately as you paste). Disk persistence happens on Save.
+        let win = self.clone();
+        key_entry.connect_changed(move |entry| {
+            let v = entry.text().to_string();
+            win.state.borrow_mut().config.groq_api_key = v;
+            win.update_mic_button_state();
+        });
+        let win = self.clone();
+        lang_entry.connect_changed(move |entry| {
+            let v = entry.text().to_string();
+            win.state.borrow_mut().config.transcribe_language = v;
+        });
+
+        let win = self.clone();
+        let key_entry_for_save = key_entry.clone();
+        let lang_entry_for_save = lang_entry.clone();
+        save_btn.connect_clicked(move |_| {
+            {
+                let mut state = win.state.borrow_mut();
+                state.config.groq_api_key = key_entry_for_save.text().to_string();
+                state.config.transcribe_language = lang_entry_for_save.text().to_string();
+            }
+            let result = win.state.borrow().config.save();
+            let toast = match result {
+                Ok(()) => adw::Toast::builder()
+                    .title("Voice settings saved")
+                    .timeout(2)
+                    .build(),
+                Err(e) => adw::Toast::builder()
+                    .title(&format!("Could not save: {e}"))
+                    .timeout(5)
+                    .build(),
+            };
+            win.toast_overlay.add_toast(toast);
+            win.update_mic_button_state();
+        });
+
+        voice.append(&voice_title);
+        voice.append(&voice_blurb);
+        voice.append(&key_label);
+        voice.append(&key_row);
+        voice.append(&key_link);
+        voice.append(&lang_label);
+        voice.append(&lang_entry);
+        voice.append(&key_note);
+
+        stack.add_titled(&appearance, Some("appearance"), "Appearance");
+        stack.add_titled(&voice, Some("voice"), "Voice");
+
+        let switcher = gtk::StackSwitcher::new();
+        switcher.set_stack(Some(&stack));
+        switcher.set_halign(gtk::Align::Center);
+
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        container.append(&switcher);
+        container.append(&stack);
 
         popover.set_child(Some(&container));
         popover
@@ -634,6 +798,13 @@ impl JotWindow {
     fn select_note(self: &Rc<Self>, id: i64) {
         if self.state.borrow().current_id == Some(id) {
             return;
+        }
+        // Switching notes mid-transcription would dump tokens into the
+        // wrong place. Finalise (drops tentatives, clears handle) before
+        // we move.
+        if self.voice_active() {
+            self.voice_stop();
+            self.voice_finalise(None);
         }
         // Save current before switching
         self.save_pending();
@@ -1406,6 +1577,250 @@ impl JotWindow {
             Some(iter) => iter.has_tag(&self.url_tag),
             None => false,
         }
+    }
+
+    // ────────────────────────────── voice ─────────────────────────────
+
+    fn voice_active(&self) -> bool {
+        self.transcribe.borrow().is_some()
+    }
+
+    fn pending_chunk_count(&self) -> usize {
+        self.voice_state
+            .borrow()
+            .as_ref()
+            .map(|s| s.pending.values().filter(|v| v.is_none()).count())
+            .unwrap_or(0)
+    }
+
+    fn update_mic_button_state(&self) {
+        let has_key = !self.state.borrow().config.groq_api_key.trim().is_empty();
+        let active = self.voice_active();
+        let started = self
+            .voice_state
+            .borrow()
+            .as_ref()
+            .map(|s| s.started)
+            .unwrap_or(false);
+        self.mic_btn.set_sensitive(has_key);
+        if active {
+            self.mic_btn.add_css_class("jot-mic-recording");
+            self.mic_btn.set_icon_name("media-playback-stop-symbolic");
+            self.mic_btn.set_tooltip_text(Some("Stop transcription"));
+            let pending = self.pending_chunk_count();
+            let label = if !started {
+                "● Connecting…".to_string()
+            } else if pending > 0 {
+                format!("● Recording  ·  {pending} chunk(s) in flight")
+            } else {
+                "● Recording".to_string()
+            };
+            self.subtitle_label.set_text(&label);
+            self.subtitle_label.add_css_class("jot-mic-listening");
+        } else {
+            self.mic_btn.remove_css_class("jot-mic-recording");
+            self.mic_btn
+                .set_icon_name("audio-input-microphone-symbolic");
+            self.mic_btn.set_tooltip_text(Some(if has_key {
+                "Start voice transcription"
+            } else {
+                "Set your Groq API key in Settings → Voice"
+            }));
+            self.subtitle_label.remove_css_class("jot-mic-listening");
+        }
+    }
+
+    fn toggle_voice(self: &Rc<Self>) {
+        if self.voice_active() {
+            self.voice_stop();
+        } else {
+            self.voice_start();
+        }
+    }
+
+    fn voice_start(self: &Rc<Self>) {
+        let api_key = self.state.borrow().config.groq_api_key.trim().to_string();
+        if api_key.is_empty() {
+            let toast = adw::Toast::builder()
+                .title("Set your Groq API key in Settings → Voice first")
+                .timeout(4)
+                .build();
+            self.toast_overlay.add_toast(toast);
+            return;
+        }
+        if self.state.borrow().current_id.is_none() {
+            self.new_note();
+        }
+
+        let language = {
+            let l = self.state.borrow().config.transcribe_language.clone();
+            let trimmed = l.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        };
+
+        let (handle, evt_rx) = crate::transcribe::start(api_key, language);
+        *self.transcribe.borrow_mut() = Some(handle);
+
+        // Anchor where transcripts will land — at the current cursor, with
+        // right gravity so the user can keep typing in front and the mark
+        // moves with the text behind them.
+        let cursor = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        // Make sure we start on a fresh line if the cursor is mid-sentence,
+        // so the first chunk doesn't stitch into existing words.
+        if !cursor.starts_line() {
+            self.suppress.set(true);
+            let mut iter = self.buffer.iter_at_mark(&self.buffer.get_insert());
+            self.buffer.insert(&mut iter, "\n");
+            self.suppress.set(false);
+        }
+        let cursor = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        let insert_mark = self.buffer.create_mark(None, &cursor, false);
+
+        *self.voice_state.borrow_mut() = Some(VoiceSession {
+            insert_mark,
+            pending: std::collections::BTreeMap::new(),
+            next_to_emit: 0,
+            started: false,
+        });
+        self.update_mic_button_state();
+
+        let win = self.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(evt) = evt_rx.recv().await {
+                win.handle_voice_event(evt);
+            }
+        });
+    }
+
+    fn voice_stop(&self) {
+        if let Some(handle) = self.transcribe.borrow().as_ref() {
+            let tx = handle.cmd_tx.clone();
+            glib::spawn_future_local(async move {
+                let _ = tx.send(TranscriptCmd::Stop).await;
+            });
+        }
+    }
+
+    fn handle_voice_event(self: &Rc<Self>, evt: TranscriptEvent) {
+        match evt {
+            TranscriptEvent::Recording => {
+                if let Some(s) = self.voice_state.borrow_mut().as_mut() {
+                    s.started = true;
+                }
+                self.update_mic_button_state();
+                tracing::info!("voice: recording");
+            }
+            TranscriptEvent::ChunkPending { seq } => {
+                if let Some(s) = self.voice_state.borrow_mut().as_mut() {
+                    s.pending.entry(seq).or_insert(None);
+                }
+                self.update_mic_button_state();
+            }
+            TranscriptEvent::Chunk { seq, text } => {
+                if let Some(s) = self.voice_state.borrow_mut().as_mut() {
+                    s.pending.insert(seq, Some(text));
+                }
+                self.voice_drain_ready();
+                self.update_mic_button_state();
+            }
+            TranscriptEvent::Finished => {
+                self.voice_drain_ready();
+                self.voice_finalise(None);
+            }
+            TranscriptEvent::Error(msg) => {
+                tracing::warn!("voice: {msg}");
+                self.voice_drain_ready();
+                self.voice_finalise(Some(msg));
+            }
+        }
+    }
+
+    /// Pull every transcript that's ready in seq order and stitch it into
+    /// the buffer at `insert_mark`. Stops at the first hole — keeps spoken
+    /// order even when HTTP responses come back out of order.
+    fn voice_drain_ready(self: &Rc<Self>) {
+        loop {
+            let ready_text = {
+                let mut state = self.voice_state.borrow_mut();
+                let Some(state) = state.as_mut() else { return };
+                let next = state.next_to_emit;
+                match state.pending.get(&next) {
+                    Some(Some(_)) => {
+                        let text = state.pending.remove(&next).unwrap().unwrap();
+                        state.next_to_emit += 1;
+                        text
+                    }
+                    _ => return,
+                }
+            };
+
+            // Whisper sometimes returns leading whitespace; collapse it.
+            let trimmed = ready_text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let mark = match self.voice_state.borrow().as_ref() {
+                Some(s) => s.insert_mark.clone(),
+                None => return,
+            };
+
+            self.suppress.set(true);
+            let mut iter = self.buffer.iter_at_mark(&mark);
+            // Add a single space between consecutive utterances so they
+            // don't run together, but skip the leading space at the very
+            // start of the session.
+            let need_separator = iter.offset() > 0
+                && iter
+                    .clone()
+                    .backward_char()
+                    .then(|| iter.char())
+                    .map(|c| c != ' ' && c != '\n')
+                    .unwrap_or(false);
+            if need_separator {
+                self.buffer.insert(&mut iter, " ");
+            }
+            self.buffer.insert(&mut iter, trimmed);
+            self.suppress.set(false);
+
+            self.update_placeholder();
+            self.schedule_autosave();
+        }
+    }
+
+    fn voice_finalise(self: &Rc<Self>, error: Option<String>) {
+        if let Some(state) = self.voice_state.borrow_mut().take() {
+            self.buffer.delete_mark(&state.insert_mark);
+        }
+        *self.transcribe.borrow_mut() = None;
+        self.update_mic_button_state();
+        // Restore the saved-at subtitle.
+        if let Some(id) = self.state.borrow().current_id {
+            if let Some(updated_at) = self
+                .state
+                .borrow()
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| n.updated_at)
+            {
+                let local: DateTime<Local> = updated_at.into();
+                self.subtitle_label
+                    .set_text(&format!("Saved {}", local.format("%a %d %b · %H:%M")));
+            }
+        }
+        if let Some(msg) = error {
+            let toast = adw::Toast::builder()
+                .title(&format!("Voice: {msg}"))
+                .timeout(5)
+                .build();
+            self.toast_overlay.add_toast(toast);
+        }
+        self.save_pending();
     }
 
     fn install_drop_target(self: &Rc<Self>) {

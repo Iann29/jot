@@ -27,9 +27,26 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 uuid = { version = "1", features = ["v4"] }
 
+# Voice transcription stack — Groq Whisper Large v3 Turbo, VAD-chunked.
+# cpal captures continuously; a small RMS-based voice-activity detector
+# slices speech into utterance-shaped chunks at silences; reqwest POSTs
+# each chunk as multipart/form-data to Groq, which transcribes at
+# ~216× real-time, so the perceived latency is ~one short pause.
+cpal = "0.16"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "blocking"] }
+async-channel = "2"
+serde_json = "1"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Mirror release optimisation but keep debug symbols, so we can resolve
+# panic backtraces with addr2line when something blows up in the wild.
+[profile.release-debug]
+inherits = "release"
+strip = false
+debug = "line-tables-only"
