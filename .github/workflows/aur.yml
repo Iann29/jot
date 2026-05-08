@@ -1,0 +1,58 @@
+name: Publish to AUR
+
+# Runs after a GitHub Release publishes — pulls the freshly-uploaded
+# tarball + sha256, fills the PKGBUILD template, and pushes to the
+# `jot-bin` AUR repo.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (without the v prefix). Defaults to latest release.'
+        required: false
+
+jobs:
+  aur:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version + sha256
+        id: meta
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.version }}" ]]; then
+            VER="${{ inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          SHA=$(curl -fsSL "https://github.com/Iann29/jot/releases/download/v${VER}/jot-v${VER}-x86_64-linux.tar.gz.sha256" \
+            | awk '{print $1}')
+          if [[ -z "$SHA" ]]; then
+            echo "could not fetch sha256 for v$VER" >&2
+            exit 1
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Render PKGBUILD
+        run: |
+          mkdir -p out
+          sed -e "s/__VER__/${{ steps.meta.outputs.ver }}/g" \
+              -e "s/__SHA__/${{ steps.meta.outputs.sha }}/g" \
+              packaging/aur/PKGBUILD.in > out/PKGBUILD
+          cat out/PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v2.7.2
+        with:
+          pkgname: jot-bin
+          pkgbuild: ./out/PKGBUILD
+          commit_username: Iann29
+          commit_email: admin@amageweb.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ steps.meta.outputs.ver }}-1"
+          ssh_keyscan_types: rsa,ed25519
+          updpkgsums: false

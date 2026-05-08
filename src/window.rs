@@ -8,11 +8,13 @@ use chrono::{DateTime, Local, Utc};
 use gtk::glib;
 use gtk::{gdk, gio};
 
-use crate::config::Config;
+use crate::config::{Config, Theme};
 use crate::db::{images_dir, Db};
 use crate::image_canvas::ImageCanvas;
 use crate::maintenance;
+use crate::markdown_tags::{refresh_markdown_tags, MdTags};
 use crate::note::Note;
+use crate::themes::ThemeController;
 use crate::transcribe::{TranscriptCmd, TranscriptEvent, TranscriptionHandle};
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
@@ -33,6 +35,7 @@ pub struct JotWindow {
     buffer: gtk::TextBuffer,
     image_tag: gtk::TextTag,
     url_tag: gtk::TextTag,
+    md_tags: MdTags,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
@@ -40,6 +43,7 @@ pub struct JotWindow {
     mic_btn: gtk::Button,
     toast_overlay: adw::ToastOverlay,
     opacity_provider: gtk::CssProvider,
+    theme_controller: Rc<ThemeController>,
     state: RefCell<State>,
     suppress: Cell<bool>,
     autosave: RefCell<Option<glib::SourceId>>,
@@ -85,6 +89,11 @@ impl JotWindow {
         let db = Db::open().expect("could not open database");
         let config = Config::load();
 
+        // Theme provider is installed BEFORE the opacity provider so the
+        // latter (USER priority) overrides only the background-alpha rule
+        // it cares about, leaving the rest of the palette to the theme.
+        let theme_controller = ThemeController::install(config.theme);
+
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Jot")
@@ -119,6 +128,11 @@ impl JotWindow {
             .tooltip_text("Delete current note  ·  Ctrl+D")
             .build();
 
+        let export_btn = gtk::Button::builder()
+            .icon_name("document-save-symbolic")
+            .tooltip_text("Export current note as Markdown")
+            .build();
+
         let settings_btn = gtk::MenuButton::builder()
             .icon_name("emblem-system-symbolic")
             .tooltip_text("Settings")
@@ -134,6 +148,7 @@ impl JotWindow {
         header.pack_end(&close_btn);
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
+        header.pack_end(&export_btn);
 
         // Sidebar
         let search_entry = gtk::SearchEntry::builder()
@@ -192,6 +207,8 @@ impl JotWindow {
             .foreground("#7c8cff")
             .build();
         buffer.tag_table().add(&url_tag);
+
+        let md_tags = MdTags::install(&buffer);
 
         let text_view = gtk::TextView::builder()
             .buffer(&buffer)
@@ -262,6 +279,7 @@ impl JotWindow {
             buffer: buffer.clone(),
             image_tag,
             url_tag,
+            md_tags,
             title_label,
             subtitle_label,
             placeholder,
@@ -269,6 +287,7 @@ impl JotWindow {
             mic_btn: mic_btn.clone(),
             toast_overlay: toast_overlay.clone(),
             opacity_provider,
+            theme_controller,
             state: RefCell::new(State {
                 notes: Vec::new(),
                 current_id: None,
@@ -287,6 +306,8 @@ impl JotWindow {
 
         // Wire callbacks
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
+        let win = this.clone();
+        export_btn.connect_clicked(move |_| win.export_current_note());
         this.install_shortcuts();
         this.install_url_click();
         this.install_url_hover_cursor();
@@ -581,6 +602,30 @@ impl JotWindow {
         // ── Appearance tab ──────────────────────────────────────────────
         let appearance = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
+        let theme_label = gtk::Label::builder()
+            .label("Theme")
+            .halign(gtk::Align::Start)
+            .build();
+        let theme_options = gtk::StringList::new(&["System", "Light", "Dark"]);
+        let theme_dropdown = gtk::DropDown::builder().model(&theme_options).build();
+        let initial_theme_idx = match self.state.borrow().config.theme {
+            Theme::System => 0,
+            Theme::Light => 1,
+            Theme::Dark => 2,
+        };
+        theme_dropdown.set_selected(initial_theme_idx as u32);
+
+        let win = self.clone();
+        theme_dropdown.connect_selected_notify(move |dd| {
+            let theme = match dd.selected() {
+                1 => Theme::Light,
+                2 => Theme::Dark,
+                _ => Theme::System,
+            };
+            win.state.borrow_mut().config.theme = theme;
+            win.theme_controller.apply(theme);
+        });
+
         let opacity_label = gtk::Label::builder()
             .label("Window opacity")
             .halign(gtk::Align::Start)
@@ -621,6 +666,8 @@ impl JotWindow {
         hint.add_css_class("jot-row-time");
         hint.set_margin_top(6);
 
+        appearance.append(&theme_label);
+        appearance.append(&theme_dropdown);
         appearance.append(&opacity_label);
         appearance.append(&opacity_scale);
         appearance.append(&font_label);
@@ -740,8 +787,37 @@ impl JotWindow {
         voice.append(&lang_entry);
         voice.append(&key_note);
 
+        // ── Data tab ────────────────────────────────────────────────────
+        let data = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+        let export_title = gtk::Label::builder()
+            .label("Export")
+            .halign(gtk::Align::Start)
+            .build();
+        export_title.add_css_class("jot-title");
+
+        let export_blurb = gtk::Label::builder()
+            .label("Export your notes as a folder of Markdown files. Inline images are bundled into a sibling images/ directory and references rewritten to relative paths.")
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        export_blurb.add_css_class("jot-row-snippet");
+
+        let export_all_btn = gtk::Button::builder()
+            .label("Export all notes…")
+            .build();
+        export_all_btn.add_css_class("jot-accent");
+        let win = self.clone();
+        export_all_btn.connect_clicked(move |_| win.export_all_notes());
+
+        data.append(&export_title);
+        data.append(&export_blurb);
+        data.append(&export_all_btn);
+
         stack.add_titled(&appearance, Some("appearance"), "Appearance");
         stack.add_titled(&voice, Some("voice"), "Voice");
+        stack.add_titled(&data, Some("data"), "Data");
 
         let switcher = gtk::StackSwitcher::new();
         switcher.set_stack(Some(&stack));
@@ -1010,6 +1086,7 @@ impl JotWindow {
         self.update_title(&body, now);
         self.rebuild_list();
         self.refresh_url_tags();
+        refresh_markdown_tags(&self.buffer, &self.md_tags, &self.image_tag);
 
         // Snapshot for Ctrl+Z. Each saved version becomes a step on the
         // text-undo stack.
@@ -1234,6 +1311,7 @@ impl JotWindow {
             }
         }
         self.refresh_url_tags();
+        refresh_markdown_tags(&self.buffer, &self.md_tags, &self.image_tag);
     }
 
     fn insert_image_part(self: &Rc<Self>, path_str: &str) {
@@ -1821,6 +1899,122 @@ impl JotWindow {
             self.toast_overlay.add_toast(toast);
         }
         self.save_pending();
+    }
+
+    // ────────────────────────────── export ────────────────────────────
+
+    fn export_current_note(self: &Rc<Self>) {
+        let Some(id) = self.state.borrow().current_id else {
+            self.toast_overlay.add_toast(
+                adw::Toast::builder()
+                    .title("Pick a note first")
+                    .timeout(2)
+                    .build(),
+            );
+            return;
+        };
+        // Save any pending edits so the export reflects what's on screen.
+        self.save_pending();
+        let note = match self.state.borrow().notes.iter().find(|n| n.id == id).cloned() {
+            Some(n) => n,
+            None => return,
+        };
+
+        let suggested = format!("{}.md", crate::export::slugify_title(&note.title, note.id));
+        let docs = glib::user_special_dir(glib::UserDirectory::Documents)
+            .unwrap_or_else(glib::home_dir);
+        let initial_folder = gio::File::for_path(&docs);
+
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Markdown"));
+        filter.add_suffix("md");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+
+        let dialog = gtk::FileDialog::builder()
+            .title("Export note")
+            .accept_label("Export")
+            .modal(true)
+            .initial_folder(&initial_folder)
+            .initial_name(&suggested)
+            .filters(&filters)
+            .build();
+
+        let win = self.clone();
+        let window = self.window.clone();
+        glib::spawn_future_local(async move {
+            match dialog.save_future(Some(&window)).await {
+                Ok(file) => {
+                    if let Some(path) = file.path() {
+                        let toast = match crate::export::export_note_md(&note, &path, true) {
+                            Ok(()) => adw::Toast::builder()
+                                .title(&format!("Exported to {}", path.display()))
+                                .timeout(3)
+                                .build(),
+                            Err(e) => adw::Toast::builder()
+                                .title(&format!("Export failed: {e}"))
+                                .timeout(5)
+                                .build(),
+                        };
+                        win.toast_overlay.add_toast(toast);
+                    }
+                }
+                Err(e) if e.matches(gtk::DialogError::Dismissed) => {}
+                Err(e) => tracing::warn!("save dialog: {e}"),
+            }
+        });
+    }
+
+    fn export_all_notes(self: &Rc<Self>) {
+        self.save_pending();
+        let notes = self.state.borrow().notes.clone();
+        if notes.is_empty() {
+            self.toast_overlay.add_toast(
+                adw::Toast::builder()
+                    .title("No notes to export")
+                    .timeout(2)
+                    .build(),
+            );
+            return;
+        }
+        let docs = glib::user_special_dir(glib::UserDirectory::Documents)
+            .unwrap_or_else(glib::home_dir);
+        let initial_folder = gio::File::for_path(&docs);
+
+        let dialog = gtk::FileDialog::builder()
+            .title("Export all notes — pick destination folder")
+            .accept_label("Export here")
+            .modal(true)
+            .initial_folder(&initial_folder)
+            .build();
+
+        let win = self.clone();
+        let window = self.window.clone();
+        glib::spawn_future_local(async move {
+            match dialog.select_folder_future(Some(&window)).await {
+                Ok(file) => {
+                    if let Some(folder) = file.path() {
+                        let target = folder.join(format!(
+                            "jot-export-{}",
+                            chrono::Local::now().format("%Y-%m-%d")
+                        ));
+                        let toast = match crate::export::export_all_md(&notes, &target, false) {
+                            Ok(n) => adw::Toast::builder()
+                                .title(&format!("Exported {n} note(s) to {}", target.display()))
+                                .timeout(4)
+                                .build(),
+                            Err(e) => adw::Toast::builder()
+                                .title(&format!("Export failed: {e}"))
+                                .timeout(5)
+                                .build(),
+                        };
+                        win.toast_overlay.add_toast(toast);
+                    }
+                }
+                Err(e) if e.matches(gtk::DialogError::Dismissed) => {}
+                Err(e) => tracing::warn!("folder dialog: {e}"),
+            }
+        });
     }
 
     fn install_drop_target(self: &Rc<Self>) {

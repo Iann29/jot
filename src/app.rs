@@ -2,13 +2,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib};
 
 use crate::maintenance;
 use crate::window::JotWindow;
 
 pub const APP_ID: &str = "com.amageweb.Jot";
-const STYLE_CSS: &str = include_str!("style.css");
 
 pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder()
@@ -17,9 +16,8 @@ pub fn run() -> glib::ExitCode {
         .build();
 
     app.connect_startup(|_| {
-        load_css();
-        // Take the daily snapshot before anything writes to the DB so the
-        // backup reflects the state we just opened with.
+        // CSS is loaded by `ThemeController::install` inside JotWindow::build,
+        // so the stylesheet matches the user's saved theme preference.
         if let Err(e) = maintenance::ensure_daily_backup() {
             tracing::warn!("daily backup skipped: {e}");
         }
@@ -49,16 +47,4 @@ pub fn run() -> glib::ExitCode {
     });
 
     app.run()
-}
-
-fn load_css() {
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(STYLE_CSS);
-    if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
 }

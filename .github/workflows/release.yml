@@ -1,0 +1,106 @@
+name: CI & Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write   # softprops/action-gh-release needs this on tag pushes
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    name: Build (ubuntu-24.04, x86_64)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install GTK4 / libadwaita / ALSA system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libgtk-4-dev libadwaita-1-dev \
+            libasound2-dev
+
+      - name: Install Rust toolchain (stable + clippy + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo + target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: jot-linux-x86_64
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo build --release --locked
+        run: cargo build --release --locked
+
+      - name: Sanity-check the binary
+        run: |
+          file target/release/jot
+          ./target/release/jot --help >/dev/null
+
+      # ─── Release-only steps ───────────────────────────────────────────
+
+      - name: Package release tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: package
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          PKG="jot-${VERSION}-x86_64-linux"
+          mkdir -p "dist/${PKG}"
+          cp target/release/jot      "dist/${PKG}/jot"
+          cp scripts/install.sh      "dist/${PKG}/install.sh"
+          cp README.md LICENSE       "dist/${PKG}/"
+          cp -r data                 "dist/${PKG}/data"
+          chmod +x "dist/${PKG}/jot" "dist/${PKG}/install.sh"
+
+          ( cd dist && tar -czf "${PKG}.tar.gz" "${PKG}" )
+          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+          cp target/release/jot dist/jot
+
+          echo "pkg=${PKG}"          >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"  >> "$GITHUB_OUTPUT"
+
+      - name: Extract tag annotation for release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: notes
+        run: |
+          {
+            echo 'body<<__JOT_EOF__'
+            git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents)' \
+              | sed '/-----BEGIN PGP SIGNATURE-----/,$d'
+            echo '__JOT_EOF__'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.package.outputs.version }}
+          body: ${{ steps.notes.outputs.body }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/${{ steps.package.outputs.pkg }}.tar.gz
+            dist/${{ steps.package.outputs.pkg }}.tar.gz.sha256
+            dist/jot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

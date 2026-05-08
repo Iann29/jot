@@ -1,9 +1,12 @@
 mod app;
 mod config;
 mod db;
+mod export;
 mod image_canvas;
 mod maintenance;
+mod markdown_tags;
 mod note;
+mod themes;
 mod transcribe;
 mod window;
 
