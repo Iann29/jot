@@ -4,14 +4,14 @@
 //! image viewers:
 //!
 //! - **Drag** with the primary button to pan.
-//! - **Ctrl + scroll** to zoom in/out, anchored at the cursor (the pixel
-//!   under the cursor stays fixed during the zoom).
+//! - **Ctrl + scroll** to zoom in/out, anchored at the cursor (the
+//!   pixel under the cursor stays fixed during the zoom).
 //! - **Double-click** to reset to the initial fit.
 //!
 //! Implementation is a single custom `gtk::Widget` whose
 //! `WidgetImpl::snapshot` renders the texture under a `translate(pan)`
 //! + `scale(zoom)` transform — no nested Picture / Viewport, so the
-//! GTK4 layout pipeline never fights us.
+//!   GTK4 layout pipeline never fights us.
 
 use std::cell::{Cell, RefCell};
 
@@ -180,9 +180,7 @@ impl ImageCanvas {
     }
 
     fn install_scroll_zoom(&self) {
-        let scroll = gtk::EventControllerScroll::new(
-            gtk::EventControllerScrollFlags::VERTICAL,
-        );
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
         let canvas = self.clone();
         scroll.connect_scroll(move |controller, _dx, dy| {
             let event = match controller.current_event() {

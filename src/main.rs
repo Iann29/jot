@@ -25,12 +25,9 @@ fn main() -> glib::ExitCode {
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
         let log_path = dirs::cache_dir()
-            .unwrap_or_else(|| std::env::temp_dir())
+            .unwrap_or_else(std::env::temp_dir)
             .join("jot-panic.log");
-        let _ = std::fs::write(
-            &log_path,
-            format!("PANIC: {info}\n\nBacktrace:\n{bt}\n"),
-        );
+        let _ = std::fs::write(&log_path, format!("PANIC: {info}\n\nBacktrace:\n{bt}\n"));
         eprintln!("PANIC: {info}");
         eprintln!("Backtrace written to {}", log_path.display());
         eprintln!("{bt}");

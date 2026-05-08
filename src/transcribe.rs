@@ -58,9 +58,14 @@ pub enum TranscriptEvent {
     Recording,
     /// A chunk has been closed and dispatched. Useful to show "transcribing…"
     /// dots if the user wants to know we're chewing on something.
-    ChunkPending { seq: u64 },
+    ChunkPending {
+        seq: u64,
+    },
     /// A transcript came back. `seq` matches the `ChunkPending`.
-    Chunk { seq: u64, text: String },
+    Chunk {
+        seq: u64,
+        text: String,
+    },
     /// Recording stopped, no more chunks coming after this. Includes any
     /// final partial chunk we flushed at stop time.
     Finished,
@@ -122,9 +127,8 @@ fn run_session(
         }
         g.take().unwrap()
     }
-    .map_err(|e| {
+    .inspect_err(|_e| {
         let _ = stop_audio_tx.send(());
-        e
     })?;
 
     let _ = evt_tx.send_blocking(TranscriptEvent::Recording);
@@ -433,10 +437,7 @@ fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
 fn run_audio_capture(
     audio_tx: std::sync::mpsc::Sender<Vec<i16>>,
     stop_rx: std::sync::mpsc::Receiver<()>,
-    ready: Arc<(
-        std::sync::Mutex<Option<Result<u32>>>,
-        std::sync::Condvar,
-    )>,
+    ready: Arc<(std::sync::Mutex<Option<Result<u32>>>, std::sync::Condvar)>,
 ) {
     let publish = |result: Result<u32>| {
         let (mtx, cvar) = &*ready;
@@ -456,14 +457,13 @@ fn run_audio_capture(
     let device_name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
     // Try 16 kHz mono i16 first — Groq downsamples to that anyway.
-    let preferred = device.supported_input_configs().ok().and_then(|iter| {
-        iter.filter(|c| {
+    let preferred = device.supported_input_configs().ok().and_then(|mut iter| {
+        iter.find(|c| {
             c.channels() == 1
                 && c.sample_format() == cpal::SampleFormat::I16
                 && c.min_sample_rate().0 <= TARGET_SAMPLE_RATE
                 && c.max_sample_rate().0 >= TARGET_SAMPLE_RATE
         })
-        .next()
         .map(|c| c.with_sample_rate(cpal::SampleRate(TARGET_SAMPLE_RATE)))
     });
 

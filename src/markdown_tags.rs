@@ -253,7 +253,7 @@ fn scan(text: &str) -> Vec<MdSpan> {
                 && chars
                     .get(i.wrapping_sub(1))
                     .copied()
-                    .map_or(true, |p| !p.is_alphanumeric()));
+                    .is_none_or(|p| !p.is_alphanumeric()));
         if italic_open {
             if let Some(end) = find_close(&chars, i + 1, c) {
                 if end > i + 1 {
@@ -421,7 +421,7 @@ pub fn reveal_markers_at_cursor(
     let cursor = buffer.iter_at_mark(&buffer.get_insert());
     let line = cursor.line();
 
-    let line_start = buffer.iter_at_line(line).unwrap_or_else(|| start.clone());
+    let line_start = buffer.iter_at_line(line).unwrap_or(start);
     let mut line_end = buffer
         .iter_at_line(line + 1)
         .unwrap_or_else(|| buffer.end_iter());
@@ -429,11 +429,11 @@ pub fn reveal_markers_at_cursor(
         let _ = line_end.backward_char();
     }
 
-    let mut iter = line_start.clone();
+    let mut iter = line_start;
     while iter.offset() <= line_end.offset() {
         if iter.has_tag(marker_hidden) {
-            let run_start = iter.clone();
-            let mut run_end = iter.clone();
+            let run_start = iter;
+            let mut run_end = iter;
             while run_end.has_tag(marker_hidden) {
                 if run_end.offset() >= line_end.offset() {
                     break;

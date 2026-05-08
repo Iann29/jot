@@ -58,7 +58,9 @@ pub fn slugify_title(title: &str, fallback_id: i64) -> String {
 }
 
 fn yaml_escape(s: &str) -> String {
-    if s.chars().any(|c| matches!(c, ':' | '#' | '"' | '\'' | '\n')) {
+    if s.chars()
+        .any(|c| matches!(c, ':' | '#' | '"' | '\'' | '\n'))
+    {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         s.to_string()
@@ -157,8 +159,8 @@ pub fn export_note_md(note: &Note, dest_path: &Path, bundle_images: bool) -> Res
     fs::create_dir_all(dest_dir).ok();
 
     let body = render_body(note, dest_dir, bundle_images)?;
-    let mut file = fs::File::create(dest_path)
-        .with_context(|| format!("creating {}", dest_path.display()))?;
+    let mut file =
+        fs::File::create(dest_path).with_context(|| format!("creating {}", dest_path.display()))?;
     file.write_all(frontmatter(note).as_bytes())?;
     file.write_all(body.as_bytes())?;
     Ok(())

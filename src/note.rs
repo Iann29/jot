@@ -84,9 +84,7 @@ fn strip_markdown_markers(s: &str) -> String {
     // Bold + code first (paired, two chars vs one).
     s = s.replace("**", "").replace('`', "");
     // Italic — cheap pair strip: surrounding * / _.
-    while (s.starts_with('*') && s.ends_with('*'))
-        || (s.starts_with('_') && s.ends_with('_'))
-    {
+    while (s.starts_with('*') && s.ends_with('*')) || (s.starts_with('_') && s.ends_with('_')) {
         if s.len() < 2 {
             break;
         }

@@ -147,11 +147,9 @@ impl Db {
         let mut stmt = conn.prepare("SELECT body FROM notes")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut refs = HashSet::new();
-        for row in rows {
-            if let Ok(body) = row {
-                for path in extract_image_paths(&body) {
-                    refs.insert(PathBuf::from(path));
-                }
+        for body in rows.flatten() {
+            for path in extract_image_paths(&body) {
+                refs.insert(PathBuf::from(path));
             }
         }
         Ok(refs)
@@ -168,7 +166,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         tracing::info!("applying migration {} ({})", m.version, m.name);
         // PRAGMA user_version doesn't accept bound parameters in some SQLite
         // builds, so format it inline. m.version is a hardcoded i32.
-        let sql = format!("BEGIN; {}; PRAGMA user_version = {}; COMMIT;", m.sql, m.version);
+        let sql = format!(
+            "BEGIN; {}; PRAGMA user_version = {}; COMMIT;",
+            m.sql, m.version
+        );
         conn.execute_batch(&sql)
             .with_context(|| format!("migration {} ({}) failed", m.version, m.name))?;
     }
