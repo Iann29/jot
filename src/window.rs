@@ -42,7 +42,6 @@ pub struct JotWindow {
     search_entry: gtk::SearchEntry,
     mic_btn: gtk::Button,
     toast_overlay: adw::ToastOverlay,
-    opacity_provider: gtk::CssProvider,
     theme_controller: Rc<ThemeController>,
     state: RefCell<State>,
     suppress: Cell<bool>,
@@ -89,10 +88,10 @@ impl JotWindow {
         let db = Db::open().expect("could not open database");
         let config = Config::load();
 
-        // Theme provider is installed BEFORE the opacity provider so the
-        // latter (USER priority) overrides only the background-alpha rule
-        // it cares about, leaving the rest of the palette to the theme.
-        let theme_controller = ThemeController::install(config.theme);
+        // ThemeController owns the single CssProvider for both the
+        // palette and the opacity slider — they live together so the
+        // light/dark switch can't be overridden by a stale opacity rule.
+        let theme_controller = ThemeController::install(config.theme, config.opacity);
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -260,17 +259,6 @@ impl JotWindow {
         root.append(&toast_overlay);
         window.set_content(Some(&root));
 
-        // Per-instance CSS provider for opacity changes (so we don't keep
-        // attaching a new global provider every time the slider moves).
-        let opacity_provider = gtk::CssProvider::new();
-        if let Some(display) = gdk::Display::default() {
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &opacity_provider,
-                gtk::STYLE_PROVIDER_PRIORITY_USER,
-            );
-        }
-
         let this = Rc::new(JotWindow {
             window: window.clone(),
             db,
@@ -286,7 +274,6 @@ impl JotWindow {
             search_entry: search_entry.clone(),
             mic_btn: mic_btn.clone(),
             toast_overlay: toast_overlay.clone(),
-            opacity_provider,
             theme_controller,
             state: RefCell::new(State {
                 notes: Vec::new(),
@@ -1201,13 +1188,9 @@ impl JotWindow {
 
     fn apply_opacity(&self) {
         let opacity = self.state.borrow().config.opacity;
-        // Only adjust the window background — leave content (text, images,
-        // widgets) fully opaque. Compositor-side blur on the layer handles the
-        // glassy look.
-        let css = format!(
-            "window.jot-window {{ background-color: alpha(#0f1014, {opacity:.3}); }}"
-        );
-        self.opacity_provider.load_from_string(&css);
+        // ThemeController owns the combined theme + opacity provider.
+        // Forward the slider value so the active palette stays correct.
+        self.theme_controller.set_opacity(opacity);
     }
 
     fn apply_font_size(&self) {
