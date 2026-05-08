@@ -11,8 +11,8 @@ keywords = ["notes", "gtk4", "linux", "hyprland", "wayland"]
 categories = ["gui"]
 
 [dependencies]
-gtk = { package = "gtk4", version = "0.11.3", features = ["v4_18"] }
-adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
+gtk = { package = "gtk4", version = "0.11.3", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 gdk = { package = "gdk4", version = "0.11" }
 glib = "0.21"
 gio = "0.21"
