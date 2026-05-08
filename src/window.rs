@@ -1040,9 +1040,7 @@ impl JotWindow {
         {
             let mut state = self.state.borrow_mut();
             state.notes.push(note);
-            state
-                .notes
-                .sort_by_key(|n| std::cmp::Reverse(n.updated_at));
+            state.notes.sort_by_key(|n| std::cmp::Reverse(n.updated_at));
         }
         self.rebuild_list();
         self.select_note(id);
