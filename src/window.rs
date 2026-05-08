@@ -12,7 +12,7 @@ use crate::config::{Config, Theme};
 use crate::db::{images_dir, Db};
 use crate::image_canvas::ImageCanvas;
 use crate::maintenance;
-use crate::markdown_tags::{refresh_markdown_tags, MdTags};
+use crate::markdown_tags::{refresh_markdown_tags, reveal_markers_at_cursor, MdTags};
 use crate::note::Note;
 use crate::themes::ThemeController;
 use crate::transcribe::{TranscriptCmd, TranscriptEvent, TranscriptionHandle};
@@ -208,6 +208,25 @@ impl JotWindow {
         buffer.tag_table().add(&url_tag);
 
         let md_tags = MdTags::install(&buffer);
+
+        // Cursor-aware marker reveal: when the insert mark moves to a new
+        // line, hide markers everywhere and re-show them only on that line.
+        // The cell throttles work to actual line changes.
+        let mh = md_tags.marker_hidden.clone();
+        let mv = md_tags.marker_visible.clone();
+        let last_line = std::rc::Rc::new(std::cell::Cell::new(-1i32));
+        buffer.connect_mark_set(move |buf, _iter, mark| {
+            if mark.name().as_deref() != Some("insert") {
+                return;
+            }
+            let cursor = buf.iter_at_mark(&buf.get_insert());
+            let line = cursor.line();
+            if last_line.get() == line {
+                return;
+            }
+            last_line.set(line);
+            reveal_markers_at_cursor(buf, &mh, &mv);
+        });
 
         let text_view = gtk::TextView::builder()
             .buffer(&buffer)
