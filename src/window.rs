@@ -8,11 +8,13 @@ use chrono::{DateTime, Local, Utc};
 use gtk::glib;
 use gtk::{gdk, gio};
 
-use crate::config::Config;
+use crate::config::{Config, Theme};
 use crate::db::{images_dir, Db};
 use crate::image_canvas::ImageCanvas;
 use crate::maintenance;
+use crate::markdown_tags::{refresh_markdown_tags, reveal_markers_at_cursor, MdTags};
 use crate::note::Note;
+use crate::themes::ThemeController;
 use crate::transcribe::{TranscriptCmd, TranscriptEvent, TranscriptionHandle};
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
@@ -33,13 +35,14 @@ pub struct JotWindow {
     buffer: gtk::TextBuffer,
     image_tag: gtk::TextTag,
     url_tag: gtk::TextTag,
+    md_tags: MdTags,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
     search_entry: gtk::SearchEntry,
     mic_btn: gtk::Button,
     toast_overlay: adw::ToastOverlay,
-    opacity_provider: gtk::CssProvider,
+    theme_controller: Rc<ThemeController>,
     state: RefCell<State>,
     suppress: Cell<bool>,
     autosave: RefCell<Option<glib::SourceId>>,
@@ -85,6 +88,11 @@ impl JotWindow {
         let db = Db::open().expect("could not open database");
         let config = Config::load();
 
+        // ThemeController owns the single CssProvider for both the
+        // palette and the opacity slider — they live together so the
+        // light/dark switch can't be overridden by a stale opacity rule.
+        let theme_controller = ThemeController::install(config.theme, config.opacity);
+
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Jot")
@@ -119,6 +127,11 @@ impl JotWindow {
             .tooltip_text("Delete current note  ·  Ctrl+D")
             .build();
 
+        let export_btn = gtk::Button::builder()
+            .icon_name("document-save-symbolic")
+            .tooltip_text("Export current note as Markdown")
+            .build();
+
         let settings_btn = gtk::MenuButton::builder()
             .icon_name("emblem-system-symbolic")
             .tooltip_text("Settings")
@@ -134,6 +147,7 @@ impl JotWindow {
         header.pack_end(&close_btn);
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
+        header.pack_end(&export_btn);
 
         // Sidebar
         let search_entry = gtk::SearchEntry::builder()
@@ -193,6 +207,27 @@ impl JotWindow {
             .build();
         buffer.tag_table().add(&url_tag);
 
+        let md_tags = MdTags::install(&buffer);
+
+        // Cursor-aware marker reveal: when the insert mark moves to a new
+        // line, hide markers everywhere and re-show them only on that line.
+        // The cell throttles work to actual line changes.
+        let mh = md_tags.marker_hidden.clone();
+        let mv = md_tags.marker_visible.clone();
+        let last_line = std::rc::Rc::new(std::cell::Cell::new(-1i32));
+        buffer.connect_mark_set(move |buf, _iter, mark| {
+            if mark.name().as_deref() != Some("insert") {
+                return;
+            }
+            let cursor = buf.iter_at_mark(&buf.get_insert());
+            let line = cursor.line();
+            if last_line.get() == line {
+                return;
+            }
+            last_line.set(line);
+            reveal_markers_at_cursor(buf, &mh, &mv);
+        });
+
         let text_view = gtk::TextView::builder()
             .buffer(&buffer)
             .wrap_mode(gtk::WrapMode::WordChar)
@@ -243,17 +278,6 @@ impl JotWindow {
         root.append(&toast_overlay);
         window.set_content(Some(&root));
 
-        // Per-instance CSS provider for opacity changes (so we don't keep
-        // attaching a new global provider every time the slider moves).
-        let opacity_provider = gtk::CssProvider::new();
-        if let Some(display) = gdk::Display::default() {
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &opacity_provider,
-                gtk::STYLE_PROVIDER_PRIORITY_USER,
-            );
-        }
-
         let this = Rc::new(JotWindow {
             window: window.clone(),
             db,
@@ -262,13 +286,14 @@ impl JotWindow {
             buffer: buffer.clone(),
             image_tag,
             url_tag,
+            md_tags,
             title_label,
             subtitle_label,
             placeholder,
             search_entry: search_entry.clone(),
             mic_btn: mic_btn.clone(),
             toast_overlay: toast_overlay.clone(),
-            opacity_provider,
+            theme_controller,
             state: RefCell::new(State {
                 notes: Vec::new(),
                 current_id: None,
@@ -287,6 +312,8 @@ impl JotWindow {
 
         // Wire callbacks
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
+        let win = this.clone();
+        export_btn.connect_clicked(move |_| win.export_current_note());
         this.install_shortcuts();
         this.install_url_click();
         this.install_url_hover_cursor();
@@ -430,22 +457,22 @@ impl JotWindow {
 
         // The probe is the char that the keypress would consume.
         let probe = if backward {
-            let mut p = cursor.clone();
+            let mut p = cursor;
             if !p.backward_char() {
                 return false;
             }
             p
         } else {
-            cursor.clone()
+            cursor
         };
 
         // Find the anchor position. Either:
         //  - probe is sitting on the U+FFFC anchor itself, or
         //  - probe is inside the invisible markdown run that trails an anchor.
         let anchor_iter = if probe.char() == '\u{FFFC}' {
-            probe.clone()
+            probe
         } else if probe.has_tag(&self.image_tag) {
-            let mut walker = probe.clone();
+            let mut walker = probe;
             while walker.char() != '\u{FFFC}' {
                 if !walker.backward_char() {
                     return false;
@@ -457,7 +484,7 @@ impl JotWindow {
         };
 
         let mut start = anchor_iter;
-        let mut end = start.clone();
+        let mut end = start;
         end.forward_char(); // past the anchor itself
         while end.has_tag(&self.image_tag) {
             if !end.forward_char() {
@@ -581,6 +608,30 @@ impl JotWindow {
         // ── Appearance tab ──────────────────────────────────────────────
         let appearance = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
+        let theme_label = gtk::Label::builder()
+            .label("Theme")
+            .halign(gtk::Align::Start)
+            .build();
+        let theme_options = gtk::StringList::new(&["System", "Light", "Dark"]);
+        let theme_dropdown = gtk::DropDown::builder().model(&theme_options).build();
+        let initial_theme_idx = match self.state.borrow().config.theme {
+            Theme::System => 0,
+            Theme::Light => 1,
+            Theme::Dark => 2,
+        };
+        theme_dropdown.set_selected(initial_theme_idx as u32);
+
+        let win = self.clone();
+        theme_dropdown.connect_selected_notify(move |dd| {
+            let theme = match dd.selected() {
+                1 => Theme::Light,
+                2 => Theme::Dark,
+                _ => Theme::System,
+            };
+            win.state.borrow_mut().config.theme = theme;
+            win.theme_controller.apply(theme);
+        });
+
         let opacity_label = gtk::Label::builder()
             .label("Window opacity")
             .halign(gtk::Align::Start)
@@ -621,6 +672,8 @@ impl JotWindow {
         hint.add_css_class("jot-row-time");
         hint.set_margin_top(6);
 
+        appearance.append(&theme_label);
+        appearance.append(&theme_dropdown);
         appearance.append(&opacity_label);
         appearance.append(&opacity_scale);
         appearance.append(&font_label);
@@ -723,7 +776,7 @@ impl JotWindow {
                     .timeout(2)
                     .build(),
                 Err(e) => adw::Toast::builder()
-                    .title(&format!("Could not save: {e}"))
+                    .title(format!("Could not save: {e}"))
                     .timeout(5)
                     .build(),
             };
@@ -740,8 +793,35 @@ impl JotWindow {
         voice.append(&lang_entry);
         voice.append(&key_note);
 
+        // ── Data tab ────────────────────────────────────────────────────
+        let data = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+        let export_title = gtk::Label::builder()
+            .label("Export")
+            .halign(gtk::Align::Start)
+            .build();
+        export_title.add_css_class("jot-title");
+
+        let export_blurb = gtk::Label::builder()
+            .label("Export your notes as a folder of Markdown files. Inline images are bundled into a sibling images/ directory and references rewritten to relative paths.")
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        export_blurb.add_css_class("jot-row-snippet");
+
+        let export_all_btn = gtk::Button::builder().label("Export all notes…").build();
+        export_all_btn.add_css_class("jot-accent");
+        let win = self.clone();
+        export_all_btn.connect_clicked(move |_| win.export_all_notes());
+
+        data.append(&export_title);
+        data.append(&export_blurb);
+        data.append(&export_all_btn);
+
         stack.add_titled(&appearance, Some("appearance"), "Appearance");
         stack.add_titled(&voice, Some("voice"), "Voice");
+        stack.add_titled(&data, Some("data"), "Data");
 
         let switcher = gtk::StackSwitcher::new();
         switcher.set_stack(Some(&stack));
@@ -890,11 +970,16 @@ impl JotWindow {
         let live_body = self.extract_body_for_save();
         let snapshot: Option<Note> = {
             let state = self.state.borrow();
-            state.notes.iter().find(|n| n.id == id).cloned().map(|mut n| {
-                n.title = Note::derive_title(&live_body);
-                n.body = live_body;
-                n
-            })
+            state
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .cloned()
+                .map(|mut n| {
+                    n.title = Note::derive_title(&live_body);
+                    n.body = live_body;
+                    n
+                })
         };
 
         if let Err(e) = self.db.delete_note(id) {
@@ -955,7 +1040,7 @@ impl JotWindow {
         {
             let mut state = self.state.borrow_mut();
             state.notes.push(note);
-            state.notes.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            state.notes.sort_by_key(|n| std::cmp::Reverse(n.updated_at));
         }
         self.rebuild_list();
         self.select_note(id);
@@ -1010,6 +1095,7 @@ impl JotWindow {
         self.update_title(&body, now);
         self.rebuild_list();
         self.refresh_url_tags();
+        refresh_markdown_tags(&self.buffer, &self.md_tags, &self.image_tag);
 
         // Snapshot for Ctrl+Z. Each saved version becomes a step on the
         // text-undo stack.
@@ -1107,8 +1193,7 @@ impl JotWindow {
     }
 
     fn update_placeholder(&self) {
-        let empty = self.buffer.char_count() == 0
-            && self.state.borrow().current_id.is_some();
+        let empty = self.buffer.char_count() == 0 && self.state.borrow().current_id.is_some();
         let no_note = self.state.borrow().current_id.is_none();
         if no_note {
             self.placeholder
@@ -1124,13 +1209,9 @@ impl JotWindow {
 
     fn apply_opacity(&self) {
         let opacity = self.state.borrow().config.opacity;
-        // Only adjust the window background — leave content (text, images,
-        // widgets) fully opaque. Compositor-side blur on the layer handles the
-        // glassy look.
-        let css = format!(
-            "window.jot-window {{ background-color: alpha(#0f1014, {opacity:.3}); }}"
-        );
-        self.opacity_provider.load_from_string(&css);
+        // ThemeController owns the combined theme + opacity provider.
+        // Forward the slider value so the active palette stays correct.
+        self.theme_controller.set_opacity(opacity);
     }
 
     fn apply_font_size(&self) {
@@ -1162,9 +1243,7 @@ impl JotWindow {
         let mimes: Vec<String> = formats.mime_types().iter().map(|m| m.to_string()).collect();
         let has_texture = formats.contains_type(gdk::Texture::static_type());
         let has_image_mime = mimes.iter().any(|m| m.starts_with("image/"));
-        tracing::info!(
-            "Ctrl+V: texture={has_texture} image_mime={has_image_mime} mimes={mimes:?}"
-        );
+        tracing::info!("Ctrl+V: texture={has_texture} image_mime={has_image_mime} mimes={mimes:?}");
 
         if !has_texture && !has_image_mime {
             return false;
@@ -1186,11 +1265,7 @@ impl JotWindow {
                     );
                     return;
                 }
-                tracing::info!(
-                    "received texture {}x{}",
-                    texture.width(),
-                    texture.height()
-                );
+                tracing::info!("received texture {}x{}", texture.width(), texture.height());
                 win.handle_pasted_texture(texture);
             }
             Ok(None) => tracing::warn!("clipboard returned no texture"),
@@ -1234,6 +1309,7 @@ impl JotWindow {
             }
         }
         self.refresh_url_tags();
+        refresh_markdown_tags(&self.buffer, &self.md_tags, &self.image_tag);
     }
 
     fn insert_image_part(self: &Rc<Self>, path_str: &str) {
@@ -1361,7 +1437,7 @@ impl JotWindow {
             .tooltip_text("Zoom out  ·  Ctrl + scroll down")
             .build();
         let zoom_label = gtk::Label::builder()
-            .label(&format!("{:.0}%", canvas.zoom_pct()))
+            .label(format!("{:.0}%", canvas.zoom_pct()))
             .width_chars(5)
             .build();
         zoom_label.add_css_class("jot-row-time");
@@ -1452,11 +1528,11 @@ impl JotWindow {
         if !iter.has_tag(&self.url_tag) {
             return false;
         }
-        let mut start = iter.clone();
+        let mut start = *iter;
         if !start.starts_tag(Some(&self.url_tag)) {
             start.backward_to_tag_toggle(Some(&self.url_tag));
         }
-        let mut end = iter.clone();
+        let mut end = *iter;
         end.forward_to_tag_toggle(Some(&self.url_tag));
         let url = self.buffer.text(&start, &end, false).to_string();
         if url.is_empty() {
@@ -1464,15 +1540,11 @@ impl JotWindow {
         }
         tracing::info!("launching url {url}");
         let launcher = gtk::UriLauncher::new(&url);
-        launcher.launch(
-            Some(&self.window),
-            None::<&gio::Cancellable>,
-            |result| {
-                if let Err(e) = result {
-                    tracing::warn!("UriLauncher failed: {e}");
-                }
-            },
-        );
+        launcher.launch(Some(&self.window), None::<&gio::Cancellable>, |result| {
+            if let Err(e) = result {
+                tracing::warn!("UriLauncher failed: {e}");
+            }
+        });
         true
     }
 
@@ -1493,11 +1565,8 @@ impl JotWindow {
             if !mods.contains(gdk::ModifierType::CONTROL_MASK) {
                 return;
             }
-            let (bx, by) = tv.window_to_buffer_coords(
-                gtk::TextWindowType::Widget,
-                x as i32,
-                y as i32,
-            );
+            let (bx, by) =
+                tv.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
             if let Some(iter) = tv.iter_at_location(bx, by) {
                 if win.open_url_at_iter(&iter) {
                     gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -1565,11 +1634,9 @@ impl JotWindow {
         if self.buffer.char_count() == 0 {
             return false;
         }
-        let (bx, by) = self.text_view.window_to_buffer_coords(
-            gtk::TextWindowType::Widget,
-            x as i32,
-            y as i32,
-        );
+        let (bx, by) =
+            self.text_view
+                .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
         if bx < 0 || by < 0 {
             return false;
         }
@@ -1815,12 +1882,135 @@ impl JotWindow {
         }
         if let Some(msg) = error {
             let toast = adw::Toast::builder()
-                .title(&format!("Voice: {msg}"))
+                .title(format!("Voice: {msg}"))
                 .timeout(5)
                 .build();
             self.toast_overlay.add_toast(toast);
         }
         self.save_pending();
+    }
+
+    // ────────────────────────────── export ────────────────────────────
+
+    fn export_current_note(self: &Rc<Self>) {
+        let Some(id) = self.state.borrow().current_id else {
+            self.toast_overlay.add_toast(
+                adw::Toast::builder()
+                    .title("Pick a note first")
+                    .timeout(2)
+                    .build(),
+            );
+            return;
+        };
+        // Save any pending edits so the export reflects what's on screen.
+        self.save_pending();
+        let note = match self
+            .state
+            .borrow()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .cloned()
+        {
+            Some(n) => n,
+            None => return,
+        };
+
+        let suggested = format!("{}.md", crate::export::slugify_title(&note.title, note.id));
+        let docs =
+            glib::user_special_dir(glib::UserDirectory::Documents).unwrap_or_else(glib::home_dir);
+        let initial_folder = gio::File::for_path(&docs);
+
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Markdown"));
+        filter.add_suffix("md");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+
+        let dialog = gtk::FileDialog::builder()
+            .title("Export note")
+            .accept_label("Export")
+            .modal(true)
+            .initial_folder(&initial_folder)
+            .initial_name(&suggested)
+            .filters(&filters)
+            .build();
+
+        let win = self.clone();
+        let window = self.window.clone();
+        glib::spawn_future_local(async move {
+            match dialog.save_future(Some(&window)).await {
+                Ok(file) => {
+                    if let Some(path) = file.path() {
+                        let toast = match crate::export::export_note_md(&note, &path, true) {
+                            Ok(()) => adw::Toast::builder()
+                                .title(format!("Exported to {}", path.display()))
+                                .timeout(3)
+                                .build(),
+                            Err(e) => adw::Toast::builder()
+                                .title(format!("Export failed: {e}"))
+                                .timeout(5)
+                                .build(),
+                        };
+                        win.toast_overlay.add_toast(toast);
+                    }
+                }
+                Err(e) if e.matches(gtk::DialogError::Dismissed) => {}
+                Err(e) => tracing::warn!("save dialog: {e}"),
+            }
+        });
+    }
+
+    fn export_all_notes(self: &Rc<Self>) {
+        self.save_pending();
+        let notes = self.state.borrow().notes.clone();
+        if notes.is_empty() {
+            self.toast_overlay.add_toast(
+                adw::Toast::builder()
+                    .title("No notes to export")
+                    .timeout(2)
+                    .build(),
+            );
+            return;
+        }
+        let docs =
+            glib::user_special_dir(glib::UserDirectory::Documents).unwrap_or_else(glib::home_dir);
+        let initial_folder = gio::File::for_path(&docs);
+
+        let dialog = gtk::FileDialog::builder()
+            .title("Export all notes — pick destination folder")
+            .accept_label("Export here")
+            .modal(true)
+            .initial_folder(&initial_folder)
+            .build();
+
+        let win = self.clone();
+        let window = self.window.clone();
+        glib::spawn_future_local(async move {
+            match dialog.select_folder_future(Some(&window)).await {
+                Ok(file) => {
+                    if let Some(folder) = file.path() {
+                        let target = folder.join(format!(
+                            "jot-export-{}",
+                            chrono::Local::now().format("%Y-%m-%d")
+                        ));
+                        let toast = match crate::export::export_all_md(&notes, &target, false) {
+                            Ok(n) => adw::Toast::builder()
+                                .title(format!("Exported {n} note(s) to {}", target.display()))
+                                .timeout(4)
+                                .build(),
+                            Err(e) => adw::Toast::builder()
+                                .title(format!("Export failed: {e}"))
+                                .timeout(5)
+                                .build(),
+                        };
+                        win.toast_overlay.add_toast(toast);
+                    }
+                }
+                Err(e) if e.matches(gtk::DialogError::Dismissed) => {}
+                Err(e) => tracing::warn!("folder dialog: {e}"),
+            }
+        });
     }
 
     fn install_drop_target(self: &Rc<Self>) {
@@ -2078,7 +2268,7 @@ impl JotWindow {
 
         let local: DateTime<Local> = note.updated_at.into();
         let time = gtk::Label::builder()
-            .label(&format!("{}", local.format("%d %b · %H:%M")))
+            .label(format!("{}", local.format("%d %b · %H:%M")))
             .halign(gtk::Align::Start)
             .build();
         time.add_css_class("jot-row-time");

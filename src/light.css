@@ -1,0 +1,300 @@
+/* Jot — light theme. Mirrors dark.css selectors with a light palette.
+ *
+ * Colour mapping:
+ *   bg          #0f1014  ->  #f7f7fa
+ *   bg dim      #0a0b0e  ->  #eef0f5
+ *   surface     #14161c  ->  #ffffff
+ *   fg          #e6e6ea  ->  #1b1c22
+ *   fg dim      ...50%   ->  #5a5d6b
+ *   accent      #7c8cff  ->  #4a5cd1   (darkened for contrast on light bg)
+ *   warn        #ff5470  unchanged (mic recording)
+ *   star        #ffd166  ->  #d99a18  (slightly darker on light)
+ */
+
+window.jot-window {
+    background-color: alpha(#f7f7fa, var(--jot-opacity, 0.94));
+    color: #1b1c22;
+    border-radius: 16px;
+}
+
+window.jot-window > contents {
+    background: transparent;
+}
+
+.jot-headerbar {
+    background: linear-gradient(180deg,
+        alpha(#e6e8ee, 0.7),
+        alpha(#f7f7fa, 0.0));
+    border: 0;
+    box-shadow: none;
+    min-height: 42px;
+    padding: 0 6px;
+}
+
+.jot-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #1b1c22;
+    letter-spacing: 0.3px;
+}
+
+.jot-subtitle {
+    font-size: 10px;
+    color: alpha(#1b1c22, 0.5);
+    font-feature-settings: "tnum";
+}
+
+/* Sidebar */
+.jot-sidebar {
+    background: alpha(#eef0f5, 0.7);
+    border-right: 1px solid alpha(#000000, 0.07);
+    min-width: 220px;
+}
+
+.jot-sidebar-header {
+    padding: 8px 10px 4px 10px;
+}
+
+.jot-search {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.08);
+    border-radius: 8px;
+    color: #1b1c22;
+    padding: 4px 8px;
+    margin: 4px 8px 8px 8px;
+    min-height: 28px;
+}
+.jot-search:focus-within {
+    border-color: alpha(#4a5cd1, 0.6);
+    background: #ffffff;
+}
+
+.jot-list {
+    background: transparent;
+    padding: 4px 6px 8px 6px;
+}
+
+.jot-list > row {
+    background: transparent;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin: 2px 0;
+    transition: background 120ms ease;
+}
+.jot-list > row:hover {
+    background: alpha(#000000, 0.04);
+}
+.jot-list > row:selected {
+    background: alpha(#4a5cd1, 0.18);
+    color: #1b1c22;
+}
+.jot-list > row:selected .jot-row-snippet {
+    color: alpha(#1b1c22, 0.7);
+}
+
+.jot-row-title {
+    font-weight: 600;
+    font-size: 13px;
+    color: #1b1c22;
+}
+.jot-row-snippet {
+    font-size: 11px;
+    color: alpha(#1b1c22, 0.55);
+    margin-top: 2px;
+}
+.jot-row-time {
+    font-size: 10px;
+    color: alpha(#1b1c22, 0.4);
+    font-feature-settings: "tnum";
+    margin-top: 4px;
+}
+
+/* Editor area */
+.jot-editor-shell {
+    background: transparent;
+}
+
+.jot-editor {
+    background: transparent;
+    color: #1b1c22;
+    caret-color: #4a5cd1;
+    padding: 18px 22px;
+    font-family: "JetBrains Mono", "Inter", "Fira Code", monospace;
+}
+
+.jot-editor text {
+    background: transparent;
+    color: #1b1c22;
+}
+.jot-editor text selection {
+    background: alpha(#4a5cd1, 0.30);
+    color: #1b1c22;
+}
+
+.jot-placeholder {
+    color: alpha(#1b1c22, 0.4);
+    font-size: 14px;
+    font-style: italic;
+}
+
+/* Buttons */
+.jot-headerbar button {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.08);
+    border-radius: 8px;
+    color: #1b1c22;
+    padding: 4px 8px;
+    min-height: 28px;
+    min-width: 28px;
+}
+.jot-headerbar button:hover {
+    background: alpha(#000000, 0.08);
+    border-color: alpha(#000000, 0.12);
+}
+.jot-headerbar button:active {
+    background: alpha(#000000, 0.12);
+}
+
+.jot-accent {
+    background: linear-gradient(180deg, #5a6ce0, #4a5cd1);
+    color: #ffffff;
+    border: 0;
+    font-weight: 600;
+}
+.jot-accent:hover {
+    background: linear-gradient(180deg, #6a7ce8, #5a6ce0);
+}
+
+/* Settings popover */
+.jot-settings {
+    padding: 14px;
+    min-width: 260px;
+}
+.jot-settings label {
+    color: alpha(#1b1c22, 0.7);
+    font-size: 12px;
+}
+.jot-settings scale {
+    margin-top: 4px;
+}
+.jot-settings scale trough {
+    background: alpha(#000000, 0.08);
+    border-radius: 4px;
+    min-height: 4px;
+}
+.jot-settings scale highlight {
+    background: linear-gradient(90deg, #4a5cd1, #5a6ce0);
+    border-radius: 4px;
+}
+.jot-settings scale slider {
+    background: #ffffff;
+    border: 1px solid alpha(#000000, 0.15);
+    box-shadow: 0 2px 6px alpha(black, 0.15);
+    min-height: 14px;
+    min-width: 14px;
+    border-radius: 8px;
+    margin: -5px 0;
+}
+
+.jot-empty {
+    color: alpha(#1b1c22, 0.5);
+    font-size: 14px;
+}
+
+.jot-image-line {
+    color: #4a5cd1;
+    font-style: italic;
+}
+
+.jot-inline-image {
+    border-radius: 10px;
+    margin: 8px 4px;
+    background: alpha(#000000, 0.04);
+    box-shadow: 0 2px 12px alpha(#000000, 0.12);
+    min-width: 80px;
+    transition: box-shadow 120ms ease, transform 120ms ease;
+}
+.jot-inline-image:hover {
+    box-shadow: 0 4px 18px alpha(#000000, 0.20);
+}
+
+.jot-image-preview {
+    background: alpha(#1a1c22, 0.96);  /* preview stays dark — better for viewing images */
+}
+.jot-image-preview .jot-headerbar {
+    background: #14161c;
+    color: #e6e6ea;
+    border-bottom: 1px solid alpha(#ffffff, 0.06);
+    box-shadow: 0 2px 8px alpha(#000000, 0.4);
+}
+.jot-image-preview .jot-title { color: #e6e6ea; }
+.jot-image-preview .jot-headerbar button { color: #e6e6ea; }
+
+.jot-canvas {
+    background:
+        linear-gradient(45deg, alpha(#ffffff, 0.04) 25%, transparent 25%),
+        linear-gradient(-45deg, alpha(#ffffff, 0.04) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, alpha(#ffffff, 0.04) 75%),
+        linear-gradient(-45deg, transparent 75%, alpha(#ffffff, 0.04) 75%),
+        #14161c;
+    background-size: 24px 24px;
+    background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+}
+
+/* Mic button — recording state pulses red (same in both themes) */
+.jot-mic-recording {
+    background: alpha(#ff5470, 0.18);
+    color: #ff5470;
+    border-color: alpha(#ff5470, 0.4);
+    animation: jot-mic-pulse 1.4s ease-in-out infinite;
+}
+@keyframes jot-mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 alpha(#ff5470, 0.4); }
+    50%      { box-shadow: 0 0 0 6px alpha(#ff5470, 0.0); }
+}
+.jot-mic-listening {
+    color: #ff5470;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+}
+
+/* Pin star */
+.jot-pin-btn {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    padding: 4px;
+    min-height: 24px;
+    min-width: 24px;
+    color: alpha(#1b1c22, 0.35);
+    opacity: 0.0;
+    transition: opacity 120ms ease, color 120ms ease;
+}
+.jot-list > row:hover .jot-pin-btn,
+.jot-list > row:selected .jot-pin-btn,
+.jot-pin-btn.jot-pin-active {
+    opacity: 1.0;
+}
+.jot-pin-btn:hover {
+    background: alpha(#000000, 0.06);
+    color: #d99a18;
+}
+.jot-pin-active {
+    color: #d99a18;
+}
+
+/* Scrollbars */
+scrollbar {
+    background: transparent;
+    border: 0;
+}
+scrollbar slider {
+    background: alpha(#000000, 0.18);
+    border-radius: 6px;
+    min-width: 4px;
+    min-height: 4px;
+    margin: 2px;
+}
+scrollbar slider:hover {
+    background: alpha(#000000, 0.30);
+}

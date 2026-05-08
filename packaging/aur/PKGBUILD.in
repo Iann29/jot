@@ -1,0 +1,28 @@
+# Maintainer: Iann29 <admin@amageweb.com>
+# Generated from packaging/aur/PKGBUILD.in by .github/workflows/aur.yml
+pkgname=jot-bin
+_pkgname=jot
+pkgver=__VER__
+pkgrel=1
+pkgdesc="Lightning-fast floating notes for tiling Wayland compositors (prebuilt binary)"
+arch=('x86_64')
+url="https://github.com/Iann29/jot"
+license=('MIT')
+depends=('gtk4' 'libadwaita' 'sqlite' 'alsa-lib')
+provides=('jot')
+conflicts=('jot' 'jot-git')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/Iann29/jot/releases/download/v${pkgver}/jot-v${pkgver}-x86_64-linux.tar.gz")
+sha256sums=('__SHA__')
+options=(!strip !debug)
+
+package() {
+    cd "$srcdir/jot-v${pkgver}-x86_64-linux"
+
+    install -Dm755 "jot" "$pkgdir/usr/bin/jot"
+    install -Dm644 "data/jot.desktop" \
+        "$pkgdir/usr/share/applications/jot.desktop"
+    install -Dm644 "data/icons/jot.svg" \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/jot.svg"
+    install -Dm644 "LICENSE" \
+        "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
+}
