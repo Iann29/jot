@@ -22,6 +22,11 @@ pub struct Config {
     /// GIF recorder quality preset. Drives both the libx264 CRF on
     /// capture and the ffmpeg palette/dither on conversion.
     pub gif_quality: GifQuality,
+    /// Saved top-left position for the GIF recorder overlay (global
+    /// screen pixels). First-time setup runs the placement picker;
+    /// subsequent sessions reuse this. None = ask again next time.
+    pub recorder_overlay_x: Option<i32>,
+    pub recorder_overlay_y: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,6 +63,8 @@ impl Default for Config {
             transcribe_language: String::new(),
             gif_fps: 24,
             gif_quality: GifQuality::Balanced,
+            recorder_overlay_x: None,
+            recorder_overlay_y: None,
         }
     }
 }
