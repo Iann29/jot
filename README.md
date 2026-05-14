@@ -106,11 +106,40 @@ Jot can transcribe speech into the editor using **Groq Whisper Large v3 Turbo**.
 
 > The key is stored in plain text at `~/.config/jot/config.toml`. Audio is sent over TLS to Groq and is **not** stored on disk by Jot.
 
+## GIF recording
+
+Jot bundles a tiny screen-region recorder so you don't need Kooha for clips
+to drop into chats and PRs. The mini-overlay is title-matched as
+**Jot Recorder** so Hyprland can rule it independently of the main window.
+
+**Setup (one-time)** — install the helpers:
+
+```bash
+sudo pacman -S --needed wf-recorder slurp ffmpeg wl-clipboard
+```
+
+**Use it:**
+
+1. Press **`Super+R`** (or click the ● button next to the mic in the
+   header).
+2. Drag with `slurp` to pick a region — `Esc` cancels.
+3. The mini-overlay appears bottom-right with the timer. Click **Stop**
+   when you're done.
+4. ffmpeg's two-pass palette pipeline converts the MP4 to a sharp,
+   small GIF. The file lands in `~/Videos/gif/jot-YYYY-MM-DD-HHMMSS.gif`.
+5. From the overlay you can **Save as…** elsewhere, **Copy** the GIF to
+   the system clipboard (paste into Slack/Discord/web apps), open it in
+   your default viewer, **Re-record**, or **Close**.
+
+Defaults: **24 fps**, libx264 ultrafast capture → palette-aware GIF with
+Sierra2_4a dithering. The Kooha-killer.
+
 ## Keyboard shortcuts
 
 | Key                | Action                                |
 | ------------------ | ------------------------------------- |
 | `Super+N`          | Toggle window (Hyprland binding)      |
+| `Super+R`          | Record a screen-region GIF            |
 | `Ctrl+N`           | New note                              |
 | `Ctrl+D`           | Delete current note (toast to undo)   |
 | `Ctrl+F`           | Focus search                          |
@@ -130,6 +159,7 @@ The first non-image, non-empty line of every note becomes its title automaticall
 ~/.local/share/jot/notes.db          SQLite database (WAL mode)
 ~/.local/share/jot/images/           Pasted / dropped images
 ~/.local/share/jot/backups/          Daily snapshots (last 7)
+~/Videos/gif/                        GIF recordings (one per session)
 ~/.config/jot/config.toml            Window size, opacity, theme, font, Groq API key
 ~/.local/share/applications/jot.desktop
 ~/.local/share/icons/hicolor/scalable/apps/jot.svg
@@ -154,6 +184,8 @@ The interesting bits:
 - `src/themes.rs` — light/dark CSS swap, follows the system color scheme
 - `src/markdown_tags.rs` — single-pass scanner that applies `gtk::TextTag`s for bold/italic/code/headings/lists
 - `src/transcribe.rs` — mic capture + VAD + Groq Whisper client
+- `src/gif_recorder.rs` — slurp + wf-recorder + ffmpeg pipeline with subprocess RAII guards
+- `src/recorder_window.rs` — mini overlay UI (Recording / Converting / Done)
 - `src/image_canvas.rs` — pan/zoom image preview (single `WidgetImpl::snapshot`)
 - `src/export.rs` — markdown export with image bundling
 - `src/dark.css` / `src/light.css` — the look (rounded, glassy, transparent)

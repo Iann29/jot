@@ -27,6 +27,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 uuid = { version = "1", features = ["v4"] }
 
+# GIF recorder needs raw kill() so we can SIGINT wf-recorder (graceful
+# MP4 flush). std::process::Child::kill() sends SIGKILL only.
+libc = "0.2"
+
 # Voice transcription stack — Groq Whisper Large v3 Turbo, VAD-chunked.
 # cpal captures continuously; a small RMS-based voice-activity detector
 # slices speech into utterance-shaped chunks at silences; reqwest POSTs

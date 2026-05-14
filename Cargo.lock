@@ -1259,6 +1259,7 @@ dependencies = [
  "gtk4",
  "hex",
  "libadwaita",
+ "libc",
  "once_cell",
  "reqwest",
  "rusqlite",

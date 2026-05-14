@@ -17,6 +17,25 @@ pub struct Config {
     /// Optional ISO-639-1 language hint (e.g. "pt", "en"). Empty string
     /// means let Whisper auto-detect.
     pub transcribe_language: String,
+    /// GIF recorder frame rate. Valid set: 12 / 15 / 20 / 24 / 30.
+    pub gif_fps: u32,
+    /// GIF recorder quality preset. Drives both the libx264 CRF on
+    /// capture and the ffmpeg palette/dither on conversion.
+    pub gif_quality: GifQuality,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GifQuality {
+    /// CRF 17, full-frame palette stats, Sierra2_4a dither. Largest
+    /// file, sharpest motion and gradients.
+    High,
+    /// CRF 22, diff-mode palette, Sierra2_4a dither. The default —
+    /// barely-perceptible quality drop in exchange for ~half the size.
+    Balanced,
+    /// CRF 28, diff-mode palette, Bayer dither. Smallest file; visible
+    /// banding on gradients. Good for code-only screencasts.
+    Compact,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +56,8 @@ impl Default for Config {
             theme: Theme::Dark,
             groq_api_key: String::new(),
             transcribe_language: String::new(),
+            gif_fps: 24,
+            gif_quality: GifQuality::Balanced,
         }
     }
 }

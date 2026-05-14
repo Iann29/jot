@@ -122,6 +122,12 @@ impl JotWindow {
             .build();
         mic_btn.add_css_class("jot-mic-btn");
 
+        let record_btn = gtk::Button::builder()
+            .icon_name("media-record-symbolic")
+            .tooltip_text("Record screen GIF  ·  Super+R")
+            .build();
+        record_btn.add_css_class("jot-record-btn");
+
         let delete_btn = gtk::Button::builder()
             .icon_name("user-trash-symbolic")
             .tooltip_text("Delete current note  ·  Ctrl+D")
@@ -144,6 +150,7 @@ impl JotWindow {
 
         header.pack_start(&new_btn);
         header.pack_start(&mic_btn);
+        header.pack_start(&record_btn);
         header.pack_end(&close_btn);
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
@@ -314,6 +321,12 @@ impl JotWindow {
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
         let win = this.clone();
         export_btn.connect_clicked(move |_| win.export_current_note());
+
+        // GIF recorder — share the running adw::Application via the
+        // window's application() handle, hand the main window over so
+        // the recorder hides it while slurp owns the screen.
+        let win = this.clone();
+        record_btn.connect_clicked(move |_| win.launch_gif_recorder());
         this.install_shortcuts();
         this.install_url_click();
         this.install_url_hover_cursor();
@@ -793,6 +806,115 @@ impl JotWindow {
         voice.append(&lang_entry);
         voice.append(&key_note);
 
+        // ── Recorder tab ────────────────────────────────────────────────
+        let recorder = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+        let rec_title = gtk::Label::builder()
+            .label("GIF recorder")
+            .halign(gtk::Align::Start)
+            .build();
+        rec_title.add_css_class("jot-title");
+
+        let rec_blurb = gtk::Label::builder()
+            .label("Settings for the screen-region recorder (Super+R). Saved alongside the rest of your preferences.")
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        rec_blurb.add_css_class("jot-row-snippet");
+
+        let fps_label = gtk::Label::builder()
+            .label("Frame rate")
+            .halign(gtk::Align::Start)
+            .build();
+        let fps_options = gtk::StringList::new(&["12 fps", "15 fps", "20 fps", "24 fps", "30 fps"]);
+        let fps_dropdown = gtk::DropDown::builder().model(&fps_options).build();
+        let initial_fps_idx = match self.state.borrow().config.gif_fps {
+            12 => 0,
+            15 => 1,
+            20 => 2,
+            30 => 4,
+            _ => 3, // default 24
+        };
+        fps_dropdown.set_selected(initial_fps_idx as u32);
+
+        let win = self.clone();
+        fps_dropdown.connect_selected_notify(move |dd| {
+            let fps = match dd.selected() {
+                0 => 12,
+                1 => 15,
+                2 => 20,
+                4 => 30,
+                _ => 24,
+            };
+            win.state.borrow_mut().config.gif_fps = fps;
+        });
+
+        let quality_label = gtk::Label::builder()
+            .label("Quality preset")
+            .halign(gtk::Align::Start)
+            .build();
+        let quality_options = gtk::StringList::new(&[
+            "High — best motion, largest file",
+            "Balanced — default",
+            "Compact — small, may show banding",
+        ]);
+        let quality_dropdown = gtk::DropDown::builder().model(&quality_options).build();
+        let initial_q_idx = match self.state.borrow().config.gif_quality {
+            crate::config::GifQuality::High => 0,
+            crate::config::GifQuality::Balanced => 1,
+            crate::config::GifQuality::Compact => 2,
+        };
+        quality_dropdown.set_selected(initial_q_idx as u32);
+
+        let win = self.clone();
+        quality_dropdown.connect_selected_notify(move |dd| {
+            let q = match dd.selected() {
+                0 => crate::config::GifQuality::High,
+                2 => crate::config::GifQuality::Compact,
+                _ => crate::config::GifQuality::Balanced,
+            };
+            win.state.borrow_mut().config.gif_quality = q;
+        });
+
+        let rec_save_btn = gtk::Button::builder()
+            .label("Save")
+            .tooltip_text("Persist to ~/.config/jot/config.toml")
+            .build();
+        rec_save_btn.add_css_class("jot-accent");
+        let win = self.clone();
+        rec_save_btn.connect_clicked(move |_| {
+            let result = win.state.borrow().config.save();
+            let toast = match result {
+                Ok(()) => adw::Toast::builder()
+                    .title("Recorder settings saved")
+                    .timeout(2)
+                    .build(),
+                Err(e) => adw::Toast::builder()
+                    .title(format!("Could not save: {e}"))
+                    .timeout(5)
+                    .build(),
+            };
+            win.toast_overlay.add_toast(toast);
+        });
+
+        let rec_note = gtk::Label::builder()
+            .label("Higher fps + High quality on long clips produces 10+ MB GIFs.")
+            .halign(gtk::Align::Start)
+            .wrap(true)
+            .max_width_chars(38)
+            .build();
+        rec_note.add_css_class("jot-row-time");
+
+        recorder.append(&rec_title);
+        recorder.append(&rec_blurb);
+        recorder.append(&fps_label);
+        recorder.append(&fps_dropdown);
+        recorder.append(&quality_label);
+        recorder.append(&quality_dropdown);
+        recorder.append(&rec_save_btn);
+        recorder.append(&rec_note);
+
         // ── Data tab ────────────────────────────────────────────────────
         let data = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
@@ -821,6 +943,7 @@ impl JotWindow {
 
         stack.add_titled(&appearance, Some("appearance"), "Appearance");
         stack.add_titled(&voice, Some("voice"), "Voice");
+        stack.add_titled(&recorder, Some("recorder"), "Recorder");
         stack.add_titled(&data, Some("data"), "Data");
 
         let switcher = gtk::StackSwitcher::new();
@@ -1891,6 +2014,18 @@ impl JotWindow {
     }
 
     // ────────────────────────────── export ────────────────────────────
+
+    fn launch_gif_recorder(self: &Rc<Self>) {
+        let Some(app) = self.window.application() else {
+            tracing::warn!("no application — cannot start recorder");
+            return;
+        };
+        let Ok(app) = app.downcast::<adw::Application>() else {
+            tracing::warn!("application is not adw::Application");
+            return;
+        };
+        crate::recorder_window::launch_recorder(&app, Some(self.window.clone()));
+    }
 
     fn export_current_note(self: &Rc<Self>) {
         let Some(id) = self.state.borrow().current_id else {

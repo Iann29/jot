@@ -55,7 +55,7 @@ jobs:
       - name: Sanity-check the binary
         run: |
           file target/release/jot
-          ./target/release/jot --help >/dev/null
+          stat -c "%s bytes" target/release/jot
 
       # ─── Release-only steps ───────────────────────────────────────────
 

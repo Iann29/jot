@@ -289,3 +289,51 @@ scrollbar slider {
 scrollbar slider:hover {
     background: alpha(#ffffff, 0.25);
 }
+
+/* ─── GIF recorder mini-overlay ──────────────────────────────────── */
+
+window.jot-recorder {
+    background: #14161c;
+    color: #e6e6ea;
+    border-radius: 12px;
+    border: 1px solid alpha(#ffffff, 0.08);
+    box-shadow: 0 6px 28px alpha(#000000, 0.55);
+}
+window.jot-recorder > contents { background: transparent; }
+
+.jot-recorder-dot {
+    color: #ff5470;
+    font-size: 16px;
+    animation: jot-mic-pulse 1.4s ease-in-out infinite;
+}
+.jot-recorder-converting .jot-recorder-dot { color: alpha(#ffd166, 0.5); animation: none; }
+.jot-recorder-done .jot-recorder-dot       { color: #4ade80; animation: none; }
+
+.jot-recorder-status {
+    font-weight: 600;
+    font-size: 13px;
+    color: #e6e6ea;
+}
+.jot-recorder-timer {
+    font-feature-settings: "tnum";
+    color: alpha(#e6e6ea, 0.55);
+    font-size: 12px;
+    margin-left: 6px;
+}
+
+.jot-recorder button {
+    background: alpha(#ffffff, 0.06);
+    border: 1px solid alpha(#ffffff, 0.08);
+    border-radius: 8px;
+    color: #e6e6ea;
+    padding: 4px 6px;
+    min-height: 28px;
+    min-width: 28px;
+}
+.jot-recorder button:hover { background: alpha(#ffffff, 0.10); }
+.jot-recorder button.suggested-action {
+    background: linear-gradient(180deg, #ff7a8b, #ff5470);
+    border-color: alpha(#ff5470, 0.6);
+    color: #14161c;
+    font-weight: 600;
+}
