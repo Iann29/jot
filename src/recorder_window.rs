@@ -153,11 +153,12 @@ impl RecorderOverlay {
                 self.set_state(UiState::Selecting);
                 true
             }
-            RecorderEvent::RecordingStarted { region } => {
-                tracing::info!("recording region {region}");
+            RecorderEvent::RecordingStarted { region, anchor } => {
+                tracing::info!("recording region {region}, overlay anchor {anchor:?}");
                 self.set_state(UiState::Recording);
                 self.timer_label.set_text("0:00");
                 self.window.present();
+                place_overlay_at(anchor);
                 true
             }
             RecorderEvent::Tick { seconds } => {
@@ -392,4 +393,20 @@ fn fmt_timer(seconds: u64) -> String {
     let m = seconds / 60;
     let s = seconds % 60;
     format!("{m}:{s:02}")
+}
+
+/// Move the recorder overlay so its top-left lands at `(x, y)`. The
+/// window is matched by title ("Jot Recorder"). Fire-and-forget — if
+/// hyprctl is missing (non-Hyprland session) or the dispatch fails,
+/// the overlay keeps whatever position the compositor chose.
+fn place_overlay_at(anchor: (i32, i32)) {
+    let (x, y) = anchor;
+    let _ = std::process::Command::new("hyprctl")
+        .arg("dispatch")
+        .arg("movewindowpixel")
+        .arg(format!("exact {x} {y},title:^(Jot Recorder)$"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
