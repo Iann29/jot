@@ -56,21 +56,10 @@ pub fn launch_recorder(app: &adw::Application, main_window: Option<adw::Applicat
         return;
     }
 
-    // First time? Show the placement picker so the user parks the
-    // overlay exactly where they want with Super+drag. Subsequent
-    // sessions skip straight to recording.
-    let cfg = crate::config::Config::load();
-    let saved = match (cfg.recorder_overlay_x, cfg.recorder_overlay_y) {
-        (Some(x), Some(y)) => Some((x, y)),
-        _ => None,
-    };
-
-    if saved.is_none() {
-        PlacementPicker::launch(app, main_window);
-        return;
-    }
-
-    start_recording_session(app, main_window);
+    // Always show the placement picker before recording. The last
+    // saved spot (if any) is used as the picker's starting position
+    // so the user can just hit OK if it's already where they want.
+    PlacementPicker::launch(app, main_window);
 }
 
 fn start_recording_session(app: &adw::Application, main_window: Option<adw::ApplicationWindow>) {
@@ -176,10 +165,10 @@ impl RecorderOverlay {
                 self.set_state(UiState::Recording);
                 self.timer_label.set_text("0:00");
                 self.window.present();
-                // Use the saved Super+drag placement if present; fall
-                // back to the smart-corner heuristic otherwise. Apply
-                // on map so Hyprland has actually realised the window
-                // by the time we movewindowpixel against it.
+                // Position came from the placement picker that ran
+                // just before recording started; reuse the same
+                // saved coords here so the live overlay lands where
+                // the user just parked the picker.
                 let cfg = crate::config::Config::load();
                 let anchor = match (cfg.recorder_overlay_x, cfg.recorder_overlay_y) {
                     (Some(x), Some(y)) => Some((x, y)),
@@ -437,26 +426,24 @@ fn hyprctl_move(title: &str, x: i32, y: i32) {
         .spawn();
 }
 
-/// Wait until the window is actually mapped, then call hyprctl. Avoids
-/// the race where present() returns before the compositor has the
-/// surface and movewindowpixel becomes a no-op.
-fn schedule_place_on_map(window: &adw::ApplicationWindow, anchor: (i32, i32), title: &str) {
-    let title_owned: String = title.to_string();
+/// Move the window to `anchor` after Hyprland has actually registered
+/// it. We tried `connect_map` and `is_mapped()` first, but both fire
+/// inside GTK before the wayland surface is committed — so the
+/// movewindowpixel dispatch arrives before Hyprland's openwindow
+/// event and silently no-ops, leaving the overlay at Hyprland's
+/// default-centered position. A pair of delayed dispatches (one fast,
+/// one slow) cover both fast and slow open paths without being
+/// perceptible to the user.
+fn schedule_place_on_map(_window: &adw::ApplicationWindow, anchor: (i32, i32), title: &str) {
     let (x, y) = anchor;
-    if window.is_mapped() {
-        hyprctl_move(&title_owned, x, y);
-        return;
-    }
-    let handler = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let handler_clone = handler.clone();
-    let title_for_cb = title_owned.clone();
-    let id = window.connect_map(move |w| {
-        hyprctl_move(&title_for_cb, x, y);
-        if let Some(h) = handler_clone.borrow_mut().take() {
-            w.disconnect(h);
-        }
+    let t1 = title.to_string();
+    let t2 = title.to_string();
+    glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+        hyprctl_move(&t1, x, y);
     });
-    *handler.borrow_mut() = Some(id);
+    glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+        hyprctl_move(&t2, x, y);
+    });
 }
 
 /// Read the current top-left screen position of the window whose title
@@ -590,6 +577,13 @@ impl PlacementPicker {
         }
         let me = std::rc::Rc::new(Self::build(app, main_weak));
         me.window.present();
+        // If we have a remembered spot, start the picker there so the
+        // user can just hit OK to confirm; otherwise leave it at the
+        // Hyprland-default center.
+        let cfg = crate::config::Config::load();
+        if let (Some(x), Some(y)) = (cfg.recorder_overlay_x, cfg.recorder_overlay_y) {
+            schedule_place_on_map(&me.window, (x, y), PLACEMENT_TITLE);
+        }
     }
 
     fn build(

@@ -913,33 +913,6 @@ impl JotWindow {
         recorder.append(&quality_label);
         recorder.append(&quality_dropdown);
         recorder.append(&rec_save_btn);
-
-        let rec_reset_btn = gtk::Button::builder()
-            .label("Reset overlay position")
-            .tooltip_text("Re-open the placement picker on the next Super+R")
-            .build();
-        let win = self.clone();
-        rec_reset_btn.connect_clicked(move |_| {
-            {
-                let mut state = win.state.borrow_mut();
-                state.config.recorder_overlay_x = None;
-                state.config.recorder_overlay_y = None;
-            }
-            let result = win.state.borrow().config.save();
-            let toast = match result {
-                Ok(()) => adw::Toast::builder()
-                    .title("Overlay position reset — picker will run next time")
-                    .timeout(3)
-                    .build(),
-                Err(e) => adw::Toast::builder()
-                    .title(format!("Could not save: {e}"))
-                    .timeout(5)
-                    .build(),
-            };
-            win.toast_overlay.add_toast(toast);
-        });
-
-        recorder.append(&rec_reset_btn);
         recorder.append(&rec_note);
 
         // ── Data tab ────────────────────────────────────────────────────
