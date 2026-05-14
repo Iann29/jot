@@ -56,6 +56,24 @@ pub fn launch_recorder(app: &adw::Application, main_window: Option<adw::Applicat
         return;
     }
 
+    // First time? Show the placement picker so the user parks the
+    // overlay exactly where they want with Super+drag. Subsequent
+    // sessions skip straight to recording.
+    let cfg = crate::config::Config::load();
+    let saved = match (cfg.recorder_overlay_x, cfg.recorder_overlay_y) {
+        (Some(x), Some(y)) => Some((x, y)),
+        _ => None,
+    };
+
+    if saved.is_none() {
+        PlacementPicker::launch(app, main_window);
+        return;
+    }
+
+    start_recording_session(app, main_window);
+}
+
+fn start_recording_session(app: &adw::Application, main_window: Option<adw::ApplicationWindow>) {
     let main_weak: glib::WeakRef<adw::ApplicationWindow> = glib::WeakRef::new();
     if let Some(w) = main_window.as_ref() {
         w.set_visible(false);
@@ -158,12 +176,17 @@ impl RecorderOverlay {
                 self.set_state(UiState::Recording);
                 self.timer_label.set_text("0:00");
                 self.window.present();
-                // Auto-place the overlay in whichever screen corner sits
-                // farthest from the region being recorded. Removes the
-                // need for a second slurp click and never pops the
-                // overlay on top of the captured area.
-                if let Some(anchor) = pick_overlay_anchor(&region) {
-                    place_overlay_at(anchor);
+                // Use the saved Super+drag placement if present; fall
+                // back to the smart-corner heuristic otherwise. Apply
+                // on map so Hyprland has actually realised the window
+                // by the time we movewindowpixel against it.
+                let cfg = crate::config::Config::load();
+                let anchor = match (cfg.recorder_overlay_x, cfg.recorder_overlay_y) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    _ => pick_overlay_anchor(&region),
+                };
+                if let Some(a) = anchor {
+                    schedule_place_on_map(&self.window, a, RECORDER_TITLE);
                 }
                 true
             }
@@ -401,20 +424,69 @@ fn fmt_timer(seconds: u64) -> String {
     format!("{m}:{s:02}")
 }
 
-/// Move the recorder overlay so its top-left lands at `(x, y)`. The
-/// window is matched by title ("Jot Recorder"). Fire-and-forget — if
-/// hyprctl is missing (non-Hyprland session) or the dispatch fails,
-/// the overlay keeps whatever position the compositor chose.
-fn place_overlay_at(anchor: (i32, i32)) {
-    let (x, y) = anchor;
+/// Move a window so its top-left lands at `(x, y)`. Matched by title.
+/// Fire-and-forget — non-Hyprland sessions are a no-op.
+fn hyprctl_move(title: &str, x: i32, y: i32) {
     let _ = std::process::Command::new("hyprctl")
         .arg("dispatch")
         .arg("movewindowpixel")
-        .arg(format!("exact {x} {y},title:^(Jot Recorder)$"))
+        .arg(format!("exact {x} {y},title:^({title})$"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// Wait until the window is actually mapped, then call hyprctl. Avoids
+/// the race where present() returns before the compositor has the
+/// surface and movewindowpixel becomes a no-op.
+fn schedule_place_on_map(window: &adw::ApplicationWindow, anchor: (i32, i32), title: &str) {
+    let title_owned: String = title.to_string();
+    let (x, y) = anchor;
+    if window.is_mapped() {
+        hyprctl_move(&title_owned, x, y);
+        return;
+    }
+    let handler = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let handler_clone = handler.clone();
+    let title_for_cb = title_owned.clone();
+    let id = window.connect_map(move |w| {
+        hyprctl_move(&title_for_cb, x, y);
+        if let Some(h) = handler_clone.borrow_mut().take() {
+            w.disconnect(h);
+        }
+    });
+    *handler.borrow_mut() = Some(id);
+}
+
+/// Read the current top-left screen position of the window whose title
+/// matches `title_match`. Uses hyprctl because Wayland clients can't
+/// read their own absolute position from GTK. Returns None if hyprctl
+/// is missing or the window isn't currently tracked.
+fn hyprctl_read_position(title_match: &str) -> Option<(i32, i32)> {
+    let out = std::process::Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let arr: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    for c in arr.as_array()?.iter() {
+        let title = c.get("title").and_then(|v| v.as_str())?;
+        if title == title_match {
+            let at = c.get("at")?.as_array()?;
+            if at.len() < 2 {
+                return None;
+            }
+            let x = at[0].as_i64()? as i32;
+            let y = at[1].as_i64()? as i32;
+            return Some((x, y));
+        }
+    }
+    None
 }
 
 /// Parse slurp output `"X,Y WxH"` into `(x, y, w, h)`.
@@ -486,4 +558,134 @@ fn pick_overlay_anchor(region: &str) -> Option<(i32, i32)> {
             dx * dx + dy * dy
         })
         .copied()
+}
+
+// ─────────────────────── Placement picker ────────────────────────────
+//
+// One-time setup window: same shape as the recorder overlay, with a
+// label telling the user to drag it with Super+click and click OK
+// when it's where they want.
+//
+// Why bother with a separate picker instead of slurp -p:
+//   * Hyprland's native Super+drag for floating windows is muscle
+//     memory for the user; we don't introduce a new gesture.
+//   * The picker is rendered exactly like the real overlay, so the
+//     user sees the actual footprint before committing.
+//   * Once placed, the absolute screen position is saved to config
+//     and reused on every subsequent recording — no re-positioning
+//     unless they hit Settings → Reset overlay position.
+
+pub const PLACEMENT_TITLE: &str = "Jot Recorder Placement";
+
+pub struct PlacementPicker {
+    window: adw::ApplicationWindow,
+}
+
+impl PlacementPicker {
+    pub fn launch(app: &adw::Application, main_window: Option<adw::ApplicationWindow>) {
+        let main_weak: glib::WeakRef<adw::ApplicationWindow> = glib::WeakRef::new();
+        if let Some(w) = main_window.as_ref() {
+            w.set_visible(false);
+            main_weak.set(Some(w));
+        }
+        let me = std::rc::Rc::new(Self::build(app, main_weak));
+        me.window.present();
+    }
+
+    fn build(
+        app: &adw::Application,
+        main_window_ref: glib::WeakRef<adw::ApplicationWindow>,
+    ) -> Self {
+        let window = adw::ApplicationWindow::builder()
+            .application(app)
+            .title(PLACEMENT_TITLE)
+            .default_width(560)
+            .default_height(80)
+            .resizable(false)
+            .build();
+        window.add_css_class("jot-recorder");
+        window.add_css_class("jot-recorder-placement");
+
+        let label = gtk::Label::builder()
+            .label("Drag me with Super+click, then OK")
+            .halign(gtk::Align::Start)
+            .hexpand(true)
+            .build();
+        label.add_css_class("jot-recorder-status");
+        label.set_margin_start(14);
+
+        let ok = gtk::Button::builder()
+            .label("OK")
+            .tooltip_text("Save this position and start recording")
+            .build();
+        ok.add_css_class("suggested-action");
+
+        let cancel = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Cancel")
+            .build();
+
+        let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        bbox.set_margin_end(10);
+        bbox.set_valign(gtk::Align::Center);
+        bbox.append(&ok);
+        bbox.append(&cancel);
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.append(&label);
+        row.append(&bbox);
+        window.set_content(Some(&row));
+
+        let app_for_ok = app.clone();
+        let win_for_ok = window.clone();
+        let main_ref_for_ok = main_window_ref.clone();
+        ok.connect_clicked(move |_| {
+            let pos = hyprctl_read_position(PLACEMENT_TITLE);
+            if let Some((x, y)) = pos {
+                let mut cfg = crate::config::Config::load();
+                cfg.recorder_overlay_x = Some(x);
+                cfg.recorder_overlay_y = Some(y);
+                if let Err(e) = cfg.save() {
+                    tracing::warn!("could not save overlay position: {e}");
+                }
+            } else {
+                tracing::warn!(
+                    "could not read placement window position via hyprctl — falling back to auto corner"
+                );
+            }
+            win_for_ok.close();
+            let main = main_ref_for_ok.upgrade();
+            start_recording_session(&app_for_ok, main);
+        });
+
+        let win_for_cancel = window.clone();
+        let main_ref_for_cancel = main_window_ref.clone();
+        cancel.connect_clicked(move |_| {
+            win_for_cancel.close();
+            if let Some(main) = main_ref_for_cancel.upgrade() {
+                main.set_visible(true);
+                main.present();
+            } else if let Some(app) = win_for_cancel.application() {
+                // CLI-launched, no main window — quit the whole app or
+                // we'd leak a zombie GTK process on the user's session.
+                app.quit();
+            }
+        });
+
+        // Escape closes the picker (same as Cancel).
+        let win_for_esc = window.clone();
+        let key_ctl = gtk::EventControllerKey::new();
+        let cancel_for_esc = cancel.clone();
+        key_ctl.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Escape {
+                cancel_for_esc.emit_clicked();
+                let _ = win_for_esc;
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctl);
+
+        Self { window }
+    }
 }

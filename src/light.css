@@ -346,3 +346,9 @@ window.jot-recorder > contents { background: transparent; }
     color: #ffffff;
     font-weight: 600;
 }
+
+/* Placement-picker variant — visually distinct from the real overlay */
+window.jot-recorder.jot-recorder-placement {
+    border: 2px dashed alpha(#4a5cd1, 0.55);
+    background: alpha(#ffffff, 0.95);
+}
