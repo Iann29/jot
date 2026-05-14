@@ -57,9 +57,8 @@ pub enum RecorderEvent {
     /// `slurp` is up — the editor should hide itself if open.
     SelectingRegion,
     /// Region picked, `wf-recorder` is running. UI can show "● Recording".
-    /// `anchor` is the screen-coord point the user picked for the overlay
-    /// top-left (slurp -p). UI uses it via `hyprctl movewindowpixel`.
-    RecordingStarted { region: String, anchor: (i32, i32) },
+    /// UI computes the overlay anchor from this region.
+    RecordingStarted { region: String },
     /// One per second while recording. `seconds` counts from start.
     Tick { seconds: u64 },
     /// Stop received, ffmpeg pipeline starting.
@@ -123,20 +122,6 @@ fn run_session(
         Err(e) => return Err(e),
     };
 
-    // ── 1b. ask where the overlay should land ─────────────────────────
-    // Same UX as Kooha-doesn't-do-this: a second slurp in single-point
-    // mode. User clicks anywhere; the overlay top-left lands there.
-    let anchor = match run_slurp_point() {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            // Esc on the anchor picker = cancel the whole session, since
-            // they signalled they're done before we spent any CPU on it.
-            let _ = evt_tx.send_blocking(RecorderEvent::Cancelled);
-            return Ok(());
-        }
-        Err(e) => return Err(e),
-    };
-
     // ── 2. wf-recorder ────────────────────────────────────────────────
     let cache_dir = ensure_cache_dir()?;
     let timestamp = file_timestamp();
@@ -166,7 +151,6 @@ fn run_session(
     );
     let _ = evt_tx.send_blocking(RecorderEvent::RecordingStarted {
         region: region.clone(),
-        anchor,
     });
 
     // Wait for Stop / Cancel, ticking each second. Also notice if
@@ -260,41 +244,6 @@ fn run_slurp() -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(stdout))
-}
-
-/// Single-point slurp: `slurp -p` returns "X,Y" for the click position.
-/// Esc / cancel → Ok(None). Used to anchor the recorder overlay so it
-/// doesn't cover the region the user is filming.
-fn run_slurp_point() -> Result<Option<(i32, i32)>> {
-    let out = Command::new("slurp")
-        .arg("-p")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("spawning slurp -p")?;
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    if !out.status.success() || stdout.is_empty() {
-        tracing::info!(
-            "slurp -p cancelled or failed (status {:?}): {stderr}",
-            out.status
-        );
-        return Ok(None);
-    }
-    // slurp -p prints either "X,Y" or "X,Y 1x1" (older versions). Parse
-    // just the leading "X,Y" pair.
-    let head = stdout.split_whitespace().next().unwrap_or("");
-    let (xs, ys) = match head.split_once(',') {
-        Some(p) => p,
-        None => {
-            tracing::warn!("slurp -p returned unexpected output: {stdout:?}");
-            return Ok(None);
-        }
-    };
-    let x: i32 = xs.parse().context("slurp x")?;
-    let y: i32 = ys.parse().context("slurp y")?;
-    Ok(Some((x, y)))
 }
 
 // ────────────────────────── ffmpeg pipeline ──────────────────────────
