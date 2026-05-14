@@ -424,11 +424,26 @@ impl RecorderOverlay {
             dialog.present(Some(&self.window));
         }
 
-        if let Some(main) = self.main_window_ref.upgrade() {
+        let main_alive = self.main_window_ref.upgrade();
+        if let Some(main) = main_alive.as_ref() {
+            // Header-button entry point. Re-surface the main jot window
+            // and let the application keep running because the user is
+            // still using it.
             main.set_visible(true);
             main.present();
+            self.window.close();
+        } else {
+            // `jot --record-gif` was a one-shot launch (no other windows
+            // open). With HANDLES_COMMAND_LINE the GApplication stays
+            // alive waiting for more activations, so we'd leak a
+            // background process if we just closed the window. Quit
+            // explicitly. `quit()` flushes pending events, so calling
+            // `close()` first guarantees window destruction runs.
+            self.window.close();
+            if let Some(app) = self.window.application() {
+                app.quit();
+            }
         }
-        self.window.close();
     }
 }
 
