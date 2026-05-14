@@ -122,6 +122,12 @@ impl JotWindow {
             .build();
         mic_btn.add_css_class("jot-mic-btn");
 
+        let record_btn = gtk::Button::builder()
+            .icon_name("media-record-symbolic")
+            .tooltip_text("Record screen GIF  ·  Super+R")
+            .build();
+        record_btn.add_css_class("jot-record-btn");
+
         let delete_btn = gtk::Button::builder()
             .icon_name("user-trash-symbolic")
             .tooltip_text("Delete current note  ·  Ctrl+D")
@@ -144,6 +150,7 @@ impl JotWindow {
 
         header.pack_start(&new_btn);
         header.pack_start(&mic_btn);
+        header.pack_start(&record_btn);
         header.pack_end(&close_btn);
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
@@ -314,6 +321,12 @@ impl JotWindow {
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
         let win = this.clone();
         export_btn.connect_clicked(move |_| win.export_current_note());
+
+        // GIF recorder — share the running adw::Application via the
+        // window's application() handle, hand the main window over so
+        // the recorder hides it while slurp owns the screen.
+        let win = this.clone();
+        record_btn.connect_clicked(move |_| win.launch_gif_recorder());
         this.install_shortcuts();
         this.install_url_click();
         this.install_url_hover_cursor();
@@ -1891,6 +1904,18 @@ impl JotWindow {
     }
 
     // ────────────────────────────── export ────────────────────────────
+
+    fn launch_gif_recorder(self: &Rc<Self>) {
+        let Some(app) = self.window.application() else {
+            tracing::warn!("no application — cannot start recorder");
+            return;
+        };
+        let Ok(app) = app.downcast::<adw::Application>() else {
+            tracing::warn!("application is not adw::Application");
+            return;
+        };
+        crate::recorder_window::launch_recorder(&app, Some(self.window.clone()));
+    }
 
     fn export_current_note(self: &Rc<Self>) {
         let Some(id) = self.state.borrow().current_id else {

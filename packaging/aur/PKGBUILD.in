@@ -9,6 +9,10 @@ arch=('x86_64')
 url="https://github.com/Iann29/jot"
 license=('MIT')
 depends=('gtk4' 'libadwaita' 'sqlite' 'alsa-lib')
+optdepends=('wf-recorder: screen capture for GIF recorder'
+            'slurp: region selection for GIF recorder'
+            'ffmpeg: MP4 -> GIF conversion for GIF recorder'
+            'wl-clipboard: copy GIF to clipboard')
 provides=('jot')
 conflicts=('jot' 'jot-git')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Iann29/jot/releases/download/v${pkgver}/jot-v${pkgver}-x86_64-linux.tar.gz")
