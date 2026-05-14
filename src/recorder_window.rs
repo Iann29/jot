@@ -272,13 +272,6 @@ impl RecorderOverlay {
                 self.button_box.append(&cancel);
             }
             UiState::Done => {
-                let save_as = gtk::Button::builder()
-                    .icon_name("document-save-as-symbolic")
-                    .tooltip_text("Save as…")
-                    .build();
-                let me = self.clone();
-                save_as.connect_clicked(move |_| me.on_save_as());
-
                 let copy = gtk::Button::builder()
                     .icon_name("edit-copy-symbolic")
                     .tooltip_text("Copy GIF to clipboard")
@@ -307,7 +300,6 @@ impl RecorderOverlay {
                 let me = self.clone();
                 close.connect_clicked(move |_| me.shutdown(None));
 
-                self.button_box.append(&save_as);
                 self.button_box.append(&copy);
                 self.button_box.append(&open);
                 self.button_box.append(&rerecord);
@@ -325,56 +317,6 @@ impl RecorderOverlay {
         }
     }
 
-    fn on_save_as(self: &Rc<Self>) {
-        let src = match self.last_gif.borrow().clone() {
-            Some(p) => p,
-            None => return,
-        };
-        let suggested = src
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "jot.gif".into());
-        let initial = ensure_gif_output_dir()
-            .ok()
-            .map(|p| gtk::gio::File::for_path(&p));
-
-        let filter = gtk::FileFilter::new();
-        filter.set_name(Some("GIF"));
-        filter.add_suffix("gif");
-        let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
-        filters.append(&filter);
-
-        let builder = gtk::FileDialog::builder()
-            .title("Save GIF as")
-            .accept_label("Save")
-            .modal(true)
-            .initial_name(&suggested)
-            .filters(&filters);
-        let dialog = match &initial {
-            Some(f) => builder.initial_folder(f).build(),
-            None => builder.build(),
-        };
-
-        let me = self.clone();
-        let parent = self.window.clone();
-        glib::spawn_future_local(async move {
-            match dialog.save_future(Some(&parent)).await {
-                Ok(file) => {
-                    if let Some(dest) = file.path() {
-                        match std::fs::copy(&src, &dest) {
-                            Ok(_) => tracing::info!("saved to {}", dest.display()),
-                            Err(e) => {
-                                tracing::error!("save as failed: {e}");
-                                me.status_label.set_text(&format!("Save failed: {e}"));
-                            }
-                        }
-                    }
-                }
-                Err(e) if e.matches(gtk::DialogError::Dismissed) => {}
-                Err(e) => tracing::warn!("save-as dialog: {e}"),
-            }
-        });
-    }
 
     fn on_copy(self: &Rc<Self>) {
         let Some(p) = self.last_gif.borrow().clone() else {
