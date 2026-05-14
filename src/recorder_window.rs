@@ -12,8 +12,8 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::gif_recorder::{
-    self, copy_gif_to_clipboard, ensure_gif_output_dir, missing_tools_summary, open_path,
-    RecorderCmd, RecorderEvent, RecorderHandle,
+    self, copy_gif_to_clipboard, missing_tools_summary, open_path, RecorderCmd, RecorderEvent,
+    RecorderHandle,
 };
 
 const FPS_DEFAULT: u32 = 24;
@@ -316,7 +316,6 @@ impl RecorderOverlay {
             });
         }
     }
-
 
     fn on_copy(self: &Rc<Self>) {
         let Some(p) = self.last_gif.borrow().clone() else {
