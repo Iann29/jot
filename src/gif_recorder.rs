@@ -77,7 +77,10 @@ pub struct RecorderHandle {
 /// Spin up the recorder worker. Returns a command sender and an event
 /// receiver. Dropping `RecorderHandle` is fine — the receiver also being
 /// dropped will cause the worker to clean up and exit.
-pub fn start(fps: u32) -> (RecorderHandle, Receiver<RecorderEvent>) {
+pub fn start(
+    fps: u32,
+    quality: crate::config::GifQuality,
+) -> (RecorderHandle, Receiver<RecorderEvent>) {
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<RecorderCmd>();
     let (evt_tx, evt_rx) = async_channel::unbounded::<RecorderEvent>();
     let evt_tx_for_thread = evt_tx.clone();
@@ -85,7 +88,7 @@ pub fn start(fps: u32) -> (RecorderHandle, Receiver<RecorderEvent>) {
     std::thread::Builder::new()
         .name("jot-recorder".into())
         .spawn(move || {
-            if let Err(e) = run_session(fps, evt_tx_for_thread.clone(), cmd_rx) {
+            if let Err(e) = run_session(fps, quality, evt_tx_for_thread.clone(), cmd_rx) {
                 tracing::error!("recorder session failed: {e:#}");
                 let _ = evt_tx_for_thread.send_blocking(RecorderEvent::Error(format!("{e:#}")));
             }
@@ -99,6 +102,7 @@ pub fn start(fps: u32) -> (RecorderHandle, Receiver<RecorderEvent>) {
 
 fn run_session(
     fps: u32,
+    quality: crate::config::GifQuality,
     evt_tx: Sender<RecorderEvent>,
     cmd_rx: Receiver<RecorderCmd>,
 ) -> Result<()> {
@@ -136,7 +140,7 @@ fn run_session(
                 "-p",
                 "preset=ultrafast",
                 "-p",
-                "crf=18",
+                &format!("crf={}", quality_crf(quality)),
             ])
             .stdin(Stdio::null())
             .stderr(Stdio::piped())
@@ -190,7 +194,9 @@ fn run_session(
     let gif_path = gif_dir.join(format!("jot-{timestamp}.gif"));
     let palette = cache_dir.join(format!("jot-{timestamp}-palette.png"));
 
-    let convert_result = convert_to_gif(&mp4_path, &palette, &gif_path, fps, &cmd_rx, &evt_tx);
+    let convert_result = convert_to_gif(
+        &mp4_path, &palette, &gif_path, fps, quality, &cmd_rx, &evt_tx,
+    );
 
     // Always remove intermediates, even on failure.
     let _ = std::fs::remove_file(&mp4_path);
@@ -253,9 +259,13 @@ fn convert_to_gif(
     palette: &Path,
     gif: &Path,
     fps: u32,
+    quality: crate::config::GifQuality,
     cmd_rx: &Receiver<RecorderCmd>,
     evt_tx: &Sender<RecorderEvent>,
 ) -> Result<ConvertOutcome> {
+    let palette_stats = quality_palette_stats(quality);
+    let dither = quality_dither(quality);
+
     // Pass 1 — generate palette.
     let mut pass1 = ChildGuard::new(
         Command::new("ffmpeg")
@@ -263,7 +273,9 @@ fn convert_to_gif(
             .arg(mp4)
             .args([
                 "-vf",
-                &format!("fps={fps},scale=iw:ih:flags=lanczos,palettegen=stats_mode=diff"),
+                &format!(
+                    "fps={fps},scale=iw:ih:flags=lanczos,palettegen=stats_mode={palette_stats}"
+                ),
             ])
             .arg(palette)
             .stdin(Stdio::null())
@@ -296,7 +308,7 @@ fn convert_to_gif(
             .args([
                 "-lavfi",
                 &format!(
-                    "fps={fps},scale=iw:ih:flags=lanczos[v];[v][1:v]paletteuse=dither=sierra2_4a:diff_mode=rectangle"
+                    "fps={fps},scale=iw:ih:flags=lanczos[v];[v][1:v]paletteuse=dither={dither}:diff_mode=rectangle"
                 ),
             ])
             .arg(gif)
@@ -560,5 +572,30 @@ pub fn missing_tools_summary() -> Option<String> {
             missing.join(", "),
             missing.join(" ")
         ))
+    }
+}
+
+fn quality_crf(q: crate::config::GifQuality) -> u32 {
+    use crate::config::GifQuality::*;
+    match q {
+        High => 17,
+        Balanced => 22,
+        Compact => 28,
+    }
+}
+
+fn quality_palette_stats(q: crate::config::GifQuality) -> &'static str {
+    use crate::config::GifQuality::*;
+    match q {
+        High => "full",
+        Balanced | Compact => "diff",
+    }
+}
+
+fn quality_dither(q: crate::config::GifQuality) -> &'static str {
+    use crate::config::GifQuality::*;
+    match q {
+        High | Balanced => "sierra2_4a",
+        Compact => "bayer:bayer_scale=3",
     }
 }

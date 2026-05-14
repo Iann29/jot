@@ -16,7 +16,6 @@ use crate::gif_recorder::{
     RecorderHandle,
 };
 
-const FPS_DEFAULT: u32 = 24;
 const RECORDER_TITLE: &str = "Jot Recorder";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,7 +133,8 @@ impl RecorderOverlay {
     }
 
     fn start(self: &Rc<Self>) {
-        let (handle, evt_rx) = gif_recorder::start(FPS_DEFAULT);
+        let cfg = crate::config::Config::load();
+        let (handle, evt_rx) = gif_recorder::start(cfg.gif_fps, cfg.gif_quality);
         *self.handle.borrow_mut() = Some(handle);
 
         let me = self.clone();
