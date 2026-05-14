@@ -158,6 +158,13 @@ impl RecorderOverlay {
                 self.set_state(UiState::Recording);
                 self.timer_label.set_text("0:00");
                 self.window.present();
+                // Auto-place the overlay in whichever screen corner sits
+                // farthest from the region being recorded. Removes the
+                // need for a second slurp click and never pops the
+                // overlay on top of the captured area.
+                if let Some(anchor) = pick_overlay_anchor(&region) {
+                    place_overlay_at(anchor);
+                }
                 true
             }
             RecorderEvent::Tick { seconds } => {
@@ -392,4 +399,91 @@ fn fmt_timer(seconds: u64) -> String {
     let m = seconds / 60;
     let s = seconds % 60;
     format!("{m}:{s:02}")
+}
+
+/// Move the recorder overlay so its top-left lands at `(x, y)`. The
+/// window is matched by title ("Jot Recorder"). Fire-and-forget — if
+/// hyprctl is missing (non-Hyprland session) or the dispatch fails,
+/// the overlay keeps whatever position the compositor chose.
+fn place_overlay_at(anchor: (i32, i32)) {
+    let (x, y) = anchor;
+    let _ = std::process::Command::new("hyprctl")
+        .arg("dispatch")
+        .arg("movewindowpixel")
+        .arg(format!("exact {x} {y},title:^(Jot Recorder)$"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Parse slurp output `"X,Y WxH"` into `(x, y, w, h)`.
+fn parse_region(s: &str) -> Option<(i32, i32, i32, i32)> {
+    let mut parts = s.split_whitespace();
+    let xy = parts.next()?;
+    let wh = parts.next()?;
+    let (xs, ys) = xy.split_once(',')?;
+    let (ws, hs) = wh.split_once('x')?;
+    Some((
+        xs.parse().ok()?,
+        ys.parse().ok()?,
+        ws.parse().ok()?,
+        hs.parse().ok()?,
+    ))
+}
+
+/// Geometry of whichever monitor contains the given point (top-left of
+/// the recording region). Falls back to the primary monitor.
+fn monitor_geometry_for(x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
+    let display = gtk::gdk::Display::default()?;
+    let monitors = display.monitors();
+    let n = monitors.n_items();
+    let mut fallback: Option<(i32, i32, i32, i32)> = None;
+    for i in 0..n {
+        let item = monitors.item(i)?;
+        let m = item.downcast::<gtk::gdk::Monitor>().ok()?;
+        let g = m.geometry();
+        let mg = (g.x(), g.y(), g.width(), g.height());
+        if fallback.is_none() {
+            fallback = Some(mg);
+        }
+        if x >= g.x() && x < g.x() + g.width() && y >= g.y() && y < g.y() + g.height() {
+            return Some(mg);
+        }
+    }
+    fallback
+}
+
+/// Choose the screen corner whose centre is farthest from the centre of
+/// the recording region — gives the overlay maximum visual breathing
+/// room and guarantees it doesn't sit on top of what we're filming.
+fn pick_overlay_anchor(region: &str) -> Option<(i32, i32)> {
+    let (rx, ry, rw, rh) = parse_region(region)?;
+    let (mx, my, mw, mh) = monitor_geometry_for(rx + rw / 2, ry + rh / 2)?;
+
+    // Overlay reserves enough room for the wider Done-state layout
+    // (Copy/Open/Re-record/Close).
+    const OVERLAY_W: i32 = 560;
+    const OVERLAY_H: i32 = 80;
+    const MARGIN: i32 = 20;
+
+    let candidates = [
+        (mx + MARGIN, my + MARGIN),                                   // TL
+        (mx + mw - OVERLAY_W - MARGIN, my + MARGIN),                  // TR
+        (mx + MARGIN, my + mh - OVERLAY_H - MARGIN),                  // BL
+        (mx + mw - OVERLAY_W - MARGIN, my + mh - OVERLAY_H - MARGIN), // BR
+    ];
+
+    let rcx = rx + rw / 2;
+    let rcy = ry + rh / 2;
+    candidates
+        .iter()
+        .max_by_key(|(cx, cy)| {
+            let ocx = cx + OVERLAY_W / 2;
+            let ocy = cy + OVERLAY_H / 2;
+            let dx = (ocx - rcx) as i64;
+            let dy = (ocy - rcy) as i64;
+            dx * dx + dy * dy
+        })
+        .copied()
 }

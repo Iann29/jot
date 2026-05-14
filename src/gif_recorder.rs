@@ -57,6 +57,7 @@ pub enum RecorderEvent {
     /// `slurp` is up — the editor should hide itself if open.
     SelectingRegion,
     /// Region picked, `wf-recorder` is running. UI can show "● Recording".
+    /// UI computes the overlay anchor from this region.
     RecordingStarted { region: String },
     /// One per second while recording. `seconds` counts from start.
     Tick { seconds: u64 },
