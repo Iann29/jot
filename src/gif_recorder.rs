@@ -275,7 +275,7 @@ fn convert_to_gif(
             .args([
                 "-vf",
                 &format!(
-                    "fps={fps},scale=iw:ih:flags=lanczos,palettegen=stats_mode={palette_stats}"
+                    "fps={fps},colorspace=all=bt709:iall=bt709:range=pc:irange=tv,format=rgb24,palettegen=stats_mode={palette_stats}"
                 ),
             ])
             .arg(palette)
@@ -309,7 +309,7 @@ fn convert_to_gif(
             .args([
                 "-lavfi",
                 &format!(
-                    "fps={fps},scale=iw:ih:flags=lanczos[v];[v][1:v]paletteuse=dither={dither}:diff_mode=rectangle"
+                    "fps={fps},colorspace=all=bt709:iall=bt709:range=pc:irange=tv,format=rgb24[v];[v][1:v]paletteuse=dither={dither}:diff_mode=rectangle"
                 ),
             ])
             .arg(gif)

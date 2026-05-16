@@ -358,7 +358,7 @@ fn find_fenced_code(chars: &[char]) -> Vec<(usize, usize)> {
 /// Strip then re-apply all markdown tags. Markers also get
 /// `marker_hidden` so they vanish from rendering by default —
 /// `reveal_markers_at_cursor` brings them back on the cursor's line.
-pub fn refresh_markdown_tags(buffer: &TextBuffer, tags: &MdTags, image_tag: &TextTag) {
+pub fn refresh_markdown_tags(buffer: &TextBuffer, tags: &MdTags, excluded_tags: &[&TextTag]) {
     let start = buffer.start_iter();
     let end = buffer.end_iter();
     for t in [
@@ -380,7 +380,7 @@ pub fn refresh_markdown_tags(buffer: &TextBuffer, tags: &MdTags, image_tag: &Tex
 
     for span in spans {
         let si = buffer.iter_at_offset(span.full.0 as i32);
-        if si.has_tag(image_tag) {
+        if excluded_tags.iter().any(|tag| si.has_tag(*tag)) {
             continue;
         }
         let ei = buffer.iter_at_offset(span.full.1 as i32);

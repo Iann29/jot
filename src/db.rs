@@ -40,6 +40,15 @@ const MIGRATIONS: &[Migration] = &[
             CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(pinned DESC, updated_at DESC);
         ",
     },
+    Migration {
+        version: 3,
+        name: "add note tags and colors",
+        sql: "
+            ALTER TABLE notes ADD COLUMN tag TEXT NOT NULL DEFAULT '';
+            ALTER TABLE notes ADD COLUMN color TEXT NOT NULL DEFAULT '';
+            CREATE INDEX IF NOT EXISTS idx_notes_tag ON notes(tag);
+        ",
+    },
 ];
 
 #[derive(Clone)]
@@ -60,6 +69,13 @@ impl Db {
         })
     }
 
+    #[cfg(test)]
+    fn from_connection(conn: Connection) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(conn)),
+        }
+    }
+
     pub fn create_note(&self) -> Result<Note> {
         let now = Utc::now();
         let conn = self.inner.lock().unwrap();
@@ -72,6 +88,8 @@ impl Db {
             id,
             title: String::new(),
             body: String::new(),
+            tag: String::new(),
+            color: String::new(),
             created_at: now,
             updated_at: now,
             pinned: false,
@@ -81,7 +99,7 @@ impl Db {
     pub fn list_notes(&self) -> Result<Vec<Note>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, title, body, created_at, updated_at, pinned
+            "SELECT id, title, body, tag, color, created_at, updated_at, pinned
              FROM notes
              ORDER BY pinned DESC, updated_at DESC",
         )?;
@@ -90,9 +108,11 @@ impl Db {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 body: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                pinned: row.get::<_, i64>(5)? != 0,
+                tag: row.get(3)?,
+                color: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                pinned: row.get::<_, i64>(7)? != 0,
             })
         })?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -104,6 +124,18 @@ impl Db {
             "UPDATE notes SET pinned=?1 WHERE id=?2",
             params![if pinned { 1 } else { 0 }, id],
         )?;
+        Ok(())
+    }
+
+    pub fn set_tag(&self, id: i64, tag: &str) -> Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute("UPDATE notes SET tag=?1 WHERE id=?2", params![tag, id])?;
+        Ok(())
+    }
+
+    pub fn set_color(&self, id: i64, color: &str) -> Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute("UPDATE notes SET color=?1 WHERE id=?2", params![color, id])?;
         Ok(())
     }
 
@@ -126,12 +158,14 @@ impl Db {
     pub fn restore_note(&self, note: &Note) -> Result<()> {
         let conn = self.inner.lock().unwrap();
         conn.execute(
-            "INSERT INTO notes (id, title, body, created_at, updated_at, pinned)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO notes (id, title, body, tag, color, created_at, updated_at, pinned)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 note.id,
                 note.title,
                 note.body,
+                note.tag,
+                note.color,
                 note.created_at,
                 note.updated_at,
                 if note.pinned { 1 } else { 0 },
@@ -216,4 +250,47 @@ pub fn backups_dir() -> Result<PathBuf> {
     let dir = data_dir()?.join("backups");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run_migrations, Db};
+    use rusqlite::Connection;
+
+    #[test]
+    fn migration_adds_tag_and_color_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let mut stmt = conn.prepare("PRAGMA table_info(notes)").unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(columns.iter().any(|c| c == "tag"));
+        assert!(columns.iter().any(|c| c == "color"));
+
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn can_persist_and_list_note_tag_and_color() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let db = Db::from_connection(conn);
+
+        let note = db.create_note().unwrap();
+        db.set_tag(note.id, "work").unwrap();
+        db.set_color(note.id, "blue").unwrap();
+
+        let notes = db.list_notes().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].tag, "work");
+        assert_eq!(notes[0].color, "blue");
+    }
 }

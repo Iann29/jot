@@ -21,11 +21,22 @@ const AUTOSAVE_DEBOUNCE_MS: u32 = 400;
 const UNDO_STACK_LIMIT: usize = 25;
 const TEXT_UNDO_LIMIT: usize = 80;
 const IMAGE_TAG_NAME: &str = "jot-image";
+const COPY_TAG_NAME: &str = "jot-copy-source";
 const URL_TAG_NAME: &str = "jot-url";
 const IMAGE_MAX_W: i32 = 400;
 const IMAGE_MAX_H: i32 = 260;
 const DROP_TEXT_EXT: &[&str] = &["md", "markdown", "txt"];
 const DROP_IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+const NOTE_COLORS: &[(&str, &str)] = &[
+    ("", "No color"),
+    ("red", "Red"),
+    ("orange", "Orange"),
+    ("yellow", "Yellow"),
+    ("green", "Green"),
+    ("blue", "Blue"),
+    ("purple", "Purple"),
+    ("pink", "Pink"),
+];
 
 pub struct JotWindow {
     pub window: adw::ApplicationWindow,
@@ -34,11 +45,15 @@ pub struct JotWindow {
     text_view: gtk::TextView,
     buffer: gtk::TextBuffer,
     image_tag: gtk::TextTag,
+    copy_tag: gtk::TextTag,
     url_tag: gtk::TextTag,
     md_tags: MdTags,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
+    tag_tabs: gtk::Box,
+    tag_entry: gtk::Entry,
+    color_buttons: RefCell<Vec<(String, gtk::ToggleButton)>>,
     search_entry: gtk::SearchEntry,
     mic_btn: gtk::Button,
     toast_overlay: adw::ToastOverlay,
@@ -73,6 +88,7 @@ struct State {
     current_id: Option<i64>,
     config: Config,
     filter: String,
+    active_tag: Option<String>,
     deleted_stack: Vec<Note>,
     text_undo: VecDeque<TextSnapshot>,
 }
@@ -162,6 +178,16 @@ impl JotWindow {
             .build();
         search_entry.add_css_class("jot-search");
 
+        let tag_tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        tag_tabs.add_css_class("jot-tag-tabs");
+        let tag_scroller = gtk::ScrolledWindow::builder()
+            .child(&tag_tabs)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(38)
+            .build();
+        tag_scroller.add_css_class("jot-tag-tabs-scroll");
+
         let list_box = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .build();
@@ -175,6 +201,7 @@ impl JotWindow {
 
         let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
         sidebar.add_css_class("jot-sidebar");
+        sidebar.append(&tag_scroller);
         sidebar.append(&search_entry);
         sidebar.append(&scrolled_list);
         sidebar.set_size_request(240, -1);
@@ -192,12 +219,44 @@ impl JotWindow {
             .build();
         subtitle_label.add_css_class("jot-subtitle");
 
+        let tag_entry = gtk::Entry::builder()
+            .placeholder_text("Tag")
+            .width_chars(14)
+            .sensitive(false)
+            .build();
+        tag_entry.add_css_class("jot-tag-entry");
+
+        let color_palette = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        color_palette.add_css_class("jot-color-palette");
+        let mut color_buttons = Vec::new();
+        for (color, label) in NOTE_COLORS {
+            let button = gtk::ToggleButton::builder()
+                .has_frame(false)
+                .tooltip_text(*label)
+                .sensitive(false)
+                .build();
+            button.add_css_class("jot-color-swatch");
+            if color.is_empty() {
+                button.add_css_class("jot-color-default");
+            } else {
+                button.add_css_class(&format!("jot-color-{color}"));
+            }
+            color_palette.append(&button);
+            color_buttons.push(((*color).to_string(), button));
+        }
+
+        let note_meta = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        note_meta.add_css_class("jot-note-meta");
+        note_meta.append(&tag_entry);
+        note_meta.append(&color_palette);
+
         let title_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         title_box.set_margin_start(20);
         title_box.set_margin_top(10);
         title_box.set_margin_bottom(2);
         title_box.append(&title_label);
         title_box.append(&subtitle_label);
+        title_box.append(&note_meta);
 
         let buffer = gtk::TextBuffer::new(None);
         let image_tag = gtk::TextTag::builder()
@@ -206,6 +265,13 @@ impl JotWindow {
             .editable(false)
             .build();
         buffer.tag_table().add(&image_tag);
+
+        let copy_tag = gtk::TextTag::builder()
+            .name(COPY_TAG_NAME)
+            .invisible(true)
+            .editable(false)
+            .build();
+        buffer.tag_table().add(&copy_tag);
 
         let url_tag = gtk::TextTag::builder()
             .name(URL_TAG_NAME)
@@ -292,11 +358,15 @@ impl JotWindow {
             text_view: text_view.clone(),
             buffer: buffer.clone(),
             image_tag,
+            copy_tag,
             url_tag,
             md_tags,
             title_label,
             subtitle_label,
             placeholder,
+            tag_tabs: tag_tabs.clone(),
+            tag_entry: tag_entry.clone(),
+            color_buttons: RefCell::new(color_buttons),
             search_entry: search_entry.clone(),
             mic_btn: mic_btn.clone(),
             toast_overlay: toast_overlay.clone(),
@@ -306,6 +376,7 @@ impl JotWindow {
                 current_id: None,
                 config,
                 filter: String::new(),
+                active_tag: None,
                 deleted_stack: Vec::new(),
                 text_undo: VecDeque::new(),
             }),
@@ -319,6 +390,7 @@ impl JotWindow {
 
         // Wire callbacks
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
+        this.connect_metadata_controls();
         let win = this.clone();
         export_btn.connect_clicked(move |_| win.export_current_note());
 
@@ -343,6 +415,7 @@ impl JotWindow {
         if let Some(first) = first_id {
             this.select_note(first);
         } else {
+            this.update_note_metadata_controls();
             this.update_placeholder();
         }
 
@@ -452,13 +525,34 @@ impl JotWindow {
         });
     }
 
-    /// Backspace/Delete pressed adjacent to an inline image: drop the whole
-    /// image — anchor + the invisible markdown run that follows it — in a
-    /// single buffer.delete(). Without this, the image_tag's
+    fn connect_metadata_controls(self: &Rc<Self>) {
+        let win = self.clone();
+        self.tag_entry.connect_changed(move |entry| {
+            if win.suppress.get() {
+                return;
+            }
+            win.set_current_tag(normalize_note_tag(&entry.text()));
+        });
+
+        let color_buttons = self.color_buttons.borrow().clone();
+        for (color, button) in color_buttons {
+            let win = self.clone();
+            button.connect_clicked(move |_| {
+                if win.suppress.get() {
+                    return;
+                }
+                win.set_current_color(&color);
+            });
+        }
+    }
+
+    /// Backspace/Delete pressed adjacent to an embedded block: drop the whole
+    /// block — anchor + the invisible source run that follows it — in a
+    /// single buffer.delete(). Without this, the hidden source tag's
     /// `editable=false` makes the user's Backspace silently no-op against
-    /// the markdown text after they delete the surrounding text. Returns
+    /// the source text after they delete the surrounding text. Returns
     /// whether we consumed the keypress.
-    fn try_delete_adjacent_image(&self, backward: bool) -> bool {
+    fn try_delete_adjacent_embed(&self, backward: bool) -> bool {
         // Selection-delete is handled by GTK's default with our editable=false
         // tag, which we don't want to interfere with here.
         if self.buffer.has_selection() {
@@ -481,10 +575,10 @@ impl JotWindow {
 
         // Find the anchor position. Either:
         //  - probe is sitting on the U+FFFC anchor itself, or
-        //  - probe is inside the invisible markdown run that trails an anchor.
+        //  - probe is inside the invisible source run that trails an anchor.
         let anchor_iter = if probe.char() == '\u{FFFC}' {
             probe
-        } else if probe.has_tag(&self.image_tag) {
+        } else if probe.has_tag(&self.image_tag) || probe.has_tag(&self.copy_tag) {
             let mut walker = probe;
             while walker.char() != '\u{FFFC}' {
                 if !walker.backward_char() {
@@ -499,7 +593,7 @@ impl JotWindow {
         let mut start = anchor_iter;
         let mut end = start;
         end.forward_char(); // past the anchor itself
-        while end.has_tag(&self.image_tag) {
+        while end.has_tag(&self.image_tag) || end.has_tag(&self.copy_tag) {
             if !end.forward_char() {
                 break;
             }
@@ -576,8 +670,8 @@ impl JotWindow {
         self.window.add_controller(paste_ctl);
 
         // Backspace/Delete inside the editor: intercept before the TextView's
-        // default handler so we can atomically remove an inline image when
-        // the cursor is touching one (anchor + invisible markdown).
+        // default handler so we can atomically remove an inline image/copy block
+        // when the cursor is touching one (anchor + invisible source).
         let edit_ctl = gtk::EventControllerKey::new();
         edit_ctl.set_propagation_phase(gtk::PropagationPhase::Capture);
         let win = self.clone();
@@ -591,14 +685,14 @@ impl JotWindow {
             }
             match keyval {
                 gdk::Key::BackSpace => {
-                    if win.try_delete_adjacent_image(true) {
+                    if win.try_delete_adjacent_embed(true) {
                         glib::Propagation::Stop
                     } else {
                         glib::Propagation::Proceed
                     }
                 }
                 gdk::Key::Delete => {
-                    if win.try_delete_adjacent_image(false) {
+                    if win.try_delete_adjacent_embed(false) {
                         glib::Propagation::Stop
                     } else {
                         glib::Propagation::Proceed
@@ -961,7 +1055,68 @@ impl JotWindow {
     fn refresh_notes(self: &Rc<Self>) {
         let notes = self.db.list_notes().unwrap_or_default();
         self.state.borrow_mut().notes = notes;
+        self.rebuild_tag_tabs();
         self.rebuild_list();
+    }
+
+    fn rebuild_tag_tabs(self: &Rc<Self>) {
+        while let Some(child) = self.tag_tabs.first_child() {
+            self.tag_tabs.remove(&child);
+        }
+
+        let (tags, has_untagged, active_tag) = {
+            let mut state = self.state.borrow_mut();
+            let (tags, has_untagged) = collect_note_tags(&state.notes);
+            if let Some(active) = state.active_tag.as_deref() {
+                let active_exists = if active.is_empty() {
+                    has_untagged
+                } else {
+                    tags.iter().any(|t| t.eq_ignore_ascii_case(active))
+                };
+                if !active_exists {
+                    state.active_tag = None;
+                }
+            }
+            (tags, has_untagged, state.active_tag.clone())
+        };
+
+        let all = self.build_tag_tab("All", None, active_tag.is_none());
+        self.tag_tabs.append(&all);
+
+        if has_untagged {
+            let active = active_tag.as_deref() == Some("");
+            let untagged = self.build_tag_tab("Untagged", Some(String::new()), active);
+            self.tag_tabs.append(&untagged);
+        }
+
+        for tag in tags {
+            let active = active_tag
+                .as_deref()
+                .is_some_and(|current| current.eq_ignore_ascii_case(&tag));
+            let tab = self.build_tag_tab(&tag, Some(tag.clone()), active);
+            self.tag_tabs.append(&tab);
+        }
+    }
+
+    fn build_tag_tab(
+        self: &Rc<Self>,
+        label: &str,
+        tag_filter: Option<String>,
+        active: bool,
+    ) -> gtk::Button {
+        let button = gtk::Button::builder().label(label).has_frame(false).build();
+        button.add_css_class("jot-tag-tab");
+        if active {
+            button.add_css_class("jot-tag-tab-active");
+        }
+
+        let win = self.clone();
+        button.connect_clicked(move |_| {
+            win.state.borrow_mut().active_tag = tag_filter.clone();
+            win.rebuild_tag_tabs();
+            win.rebuild_list();
+        });
+        button
     }
 
     fn rebuild_list(self: &Rc<Self>) {
@@ -971,6 +1126,7 @@ impl JotWindow {
 
         let state = self.state.borrow();
         let filter = state.filter.trim().to_lowercase();
+        let active_tag = state.active_tag.clone();
         let current = state.current_id;
 
         let mut selected_row: Option<gtk::ListBoxRow> = None;
@@ -978,6 +1134,7 @@ impl JotWindow {
         let visible_notes: Vec<Note> = state
             .notes
             .iter()
+            .filter(|n| note_matches_tag_filter(n, active_tag.as_deref()))
             .filter(|n| filter.is_empty() || n.matches(&filter))
             .cloned()
             .collect();
@@ -1035,6 +1192,7 @@ impl JotWindow {
         self.push_text_snapshot(id, &body);
 
         self.update_title(&body, updated_at);
+        self.update_note_metadata_controls();
         self.update_placeholder();
 
         // Place cursor at end
@@ -1131,6 +1289,7 @@ impl JotWindow {
             self.suppress.set(false);
             self.title_label.set_text("");
             self.subtitle_label.set_text("");
+            self.update_note_metadata_controls();
             self.update_placeholder();
         }
 
@@ -1217,8 +1376,14 @@ impl JotWindow {
 
         self.update_title(&body, now);
         self.rebuild_list();
-        self.refresh_url_tags();
-        refresh_markdown_tags(&self.buffer, &self.md_tags, &self.image_tag);
+        if !self.render_copy_blocks_if_needed(&body) {
+            self.refresh_url_tags();
+            refresh_markdown_tags(
+                &self.buffer,
+                &self.md_tags,
+                &[&self.image_tag, &self.copy_tag],
+            );
+        }
 
         // Snapshot for Ctrl+Z. Each saved version becomes a step on the
         // text-undo stack.
@@ -1429,10 +1594,61 @@ impl JotWindow {
                 BodyPart::Image(path_str) => {
                     self.insert_image_part(&path_str);
                 }
+                BodyPart::CopyBlock(content) => {
+                    self.insert_copy_block_part(&content);
+                }
             }
         }
         self.refresh_url_tags();
-        refresh_markdown_tags(&self.buffer, &self.md_tags, &self.image_tag);
+        refresh_markdown_tags(
+            &self.buffer,
+            &self.md_tags,
+            &[&self.image_tag, &self.copy_tag],
+        );
+    }
+
+    fn render_copy_blocks_if_needed(self: &Rc<Self>, body: &str) -> bool {
+        if !self.has_unrendered_copy_block() {
+            return false;
+        }
+
+        let cursor_offset = self.buffer.iter_at_mark(&self.buffer.get_insert()).offset();
+        self.suppress.set(true);
+        self.load_body_into_buffer(body);
+        self.suppress.set(false);
+
+        let adjusted_offset = cursor_offset + copy_blocks_before_char_offset(body, cursor_offset);
+        let end_offset = self.buffer.end_iter().offset();
+        let cursor = self.buffer.iter_at_offset(adjusted_offset.min(end_offset));
+        self.buffer.place_cursor(&cursor);
+        self.update_placeholder();
+        true
+    }
+
+    fn has_unrendered_copy_block(&self) -> bool {
+        const COPY_OPEN: &str = "{copy}";
+        const COPY_CLOSE: &str = "{/copy}";
+
+        let start = self.buffer.start_iter();
+        let end = self.buffer.end_iter();
+        let text = self.buffer.text(&start, &end, true).to_string();
+        let mut byte_pos = 0;
+
+        while let Some(rel_open) = text[byte_pos..].find(COPY_OPEN) {
+            let open = byte_pos + rel_open;
+            let after_open = open + COPY_OPEN.len();
+            let Some(rel_close) = text[after_open..].find(COPY_CLOSE) else {
+                return false;
+            };
+            let char_offset = text[..open].chars().count() as i32;
+            let iter = self.buffer.iter_at_offset(char_offset);
+            if !iter.has_tag(&self.copy_tag) {
+                return true;
+            }
+            byte_pos = after_open + rel_close + COPY_CLOSE.len();
+        }
+
+        false
     }
 
     fn insert_image_part(self: &Rc<Self>, path_str: &str) {
@@ -1446,6 +1662,83 @@ impl JotWindow {
                     .insert(&mut iter, &format!("![image]({})", path_str));
             }
         }
+    }
+
+    fn insert_copy_block_part(self: &Rc<Self>, content: &str) {
+        let mut iter = self.buffer.end_iter();
+        let anchor = self.buffer.create_child_anchor(&mut iter);
+
+        let payload = copy_block_payload(content);
+        let block = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        block.add_css_class("jot-copy-block");
+
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let title = gtk::Label::builder()
+            .label("Copy")
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .build();
+        title.add_css_class("jot-copy-title");
+        title.set_hexpand(true);
+
+        let copy_btn = gtk::Button::builder()
+            .icon_name("edit-copy-symbolic")
+            .tooltip_text("Copy block to clipboard")
+            .build();
+        copy_btn.add_css_class("jot-copy-button");
+        header.append(&title);
+        header.append(&copy_btn);
+
+        let display_payload = if payload.is_empty() {
+            "(empty)".to_string()
+        } else {
+            payload.clone()
+        };
+        let text = gtk::Label::builder()
+            .label(&display_payload)
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .wrap(true)
+            .selectable(true)
+            .build();
+        text.add_css_class("jot-copy-text");
+
+        block.append(&header);
+        block.append(&text);
+        self.text_view.add_child_at_anchor(&block, &anchor);
+
+        let win = self.clone();
+        let clipboard_text = payload.clone();
+        copy_btn.connect_clicked(move |_| {
+            if let Some(display) = gdk::Display::default() {
+                display.clipboard().set_text(&clipboard_text);
+                win.toast_overlay.add_toast(
+                    adw::Toast::builder()
+                        .title("Copied block to clipboard")
+                        .timeout(2)
+                        .build(),
+                );
+            } else {
+                win.toast_overlay.add_toast(
+                    adw::Toast::builder()
+                        .title("Clipboard unavailable")
+                        .timeout(3)
+                        .build(),
+                );
+            }
+        });
+
+        let after_anchor = iter.offset();
+        let mut raw_iter = self.buffer.iter_at_offset(after_anchor);
+        let raw = format!("{{copy}}{content}{{/copy}}");
+        self.buffer.insert(&mut raw_iter, &raw);
+        let raw_chars = raw.chars().count() as i32;
+        let start = self.buffer.iter_at_offset(after_anchor);
+        let end = self.buffer.iter_at_offset(after_anchor + raw_chars);
+        self.buffer.apply_tag(&self.copy_tag, &start, &end);
+
+        let after_tag = self.buffer.iter_at_offset(after_anchor + raw_chars);
+        self.buffer.place_cursor(&after_tag);
     }
 
     fn insert_image_at_cursor(self: &Rc<Self>, path: &Path, texture: &gdk::Texture) {
@@ -1639,7 +1932,7 @@ impl JotWindow {
             // Skip URLs that fall inside an invisible image-markdown region —
             // those aren't really visible URLs the user can click; they're
             // just paths on disk that happen to start with a scheme.
-            if s.has_tag(&self.image_tag) {
+            if s.has_tag(&self.image_tag) || s.has_tag(&self.copy_tag) {
                 continue;
             }
             let e = self.buffer.iter_at_offset((off + len) as i32);
@@ -2260,10 +2553,67 @@ impl JotWindow {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum BodyPart {
     Text(String),
     Image(String),
+    CopyBlock(String),
+}
+
+fn normalize_note_tag(tag: &str) -> String {
+    tag.trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(40)
+        .collect()
+}
+
+fn normalize_note_color(color: &str) -> String {
+    let trimmed = color.trim();
+    if NOTE_COLORS.iter().any(|(id, _)| *id == trimmed) {
+        trimmed.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn note_color_css_class(color: &str) -> String {
+    let color = normalize_note_color(color);
+    if color.is_empty() {
+        "jot-color-default".to_string()
+    } else {
+        format!("jot-color-{color}")
+    }
+}
+
+fn collect_note_tags(notes: &[Note]) -> (Vec<String>, bool) {
+    let mut tags: Vec<String> = Vec::new();
+    let mut has_untagged = false;
+
+    for note in notes {
+        let tag = normalize_note_tag(&note.tag);
+        if tag.is_empty() {
+            has_untagged = true;
+            continue;
+        }
+        if !tags
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&tag))
+        {
+            tags.push(tag);
+        }
+    }
+
+    tags.sort_by_key(|tag| tag.to_lowercase());
+    (tags, has_untagged)
+}
+
+fn note_matches_tag_filter(note: &Note, active_tag: Option<&str>) -> bool {
+    match active_tag {
+        None => true,
+        Some("") => normalize_note_tag(&note.tag).is_empty(),
+        Some(tag) => normalize_note_tag(&note.tag).eq_ignore_ascii_case(tag),
+    }
 }
 
 /// Find every `http://...` / `https://...` run in `text`. Returns
@@ -2331,6 +2681,8 @@ fn scale_to_fit(tex_w: i32, tex_h: i32, max_w: i32, max_h: i32) -> (i32, i32) {
 
 fn parse_markdown_body(body: &str) -> Vec<BodyPart> {
     const PREFIX: &[u8] = b"![image](";
+    const COPY_OPEN: &[u8] = b"{copy}";
+    const COPY_CLOSE: &str = "{/copy}";
     let bytes = body.as_bytes();
     let mut parts = Vec::new();
     let mut buf = String::new();
@@ -2348,6 +2700,18 @@ fn parse_markdown_body(body: &str) -> Vec<BodyPart> {
                 continue;
             }
         }
+        if bytes[i..].starts_with(COPY_OPEN) {
+            let after = i + COPY_OPEN.len();
+            if let Some(rel) = body[after..].find(COPY_CLOSE) {
+                let end = after + rel;
+                if !buf.is_empty() {
+                    parts.push(BodyPart::Text(std::mem::take(&mut buf)));
+                }
+                parts.push(BodyPart::CopyBlock(body[after..end].to_string()));
+                i = end + COPY_CLOSE.len();
+                continue;
+            }
+        }
         let ch = body[i..].chars().next().unwrap();
         buf.push(ch);
         i += ch.len_utf8();
@@ -2356,6 +2720,45 @@ fn parse_markdown_body(body: &str) -> Vec<BodyPart> {
         parts.push(BodyPart::Text(buf));
     }
     parts
+}
+
+fn copy_block_payload(content: &str) -> String {
+    let without_leading = content
+        .strip_prefix("\r\n")
+        .or_else(|| content.strip_prefix('\n'))
+        .unwrap_or(content);
+    without_leading
+        .strip_suffix("\r\n")
+        .or_else(|| without_leading.strip_suffix('\n'))
+        .unwrap_or(without_leading)
+        .to_string()
+}
+
+fn copy_blocks_before_char_offset(body: &str, char_offset: i32) -> i32 {
+    const COPY_OPEN: &str = "{copy}";
+    const COPY_CLOSE: &str = "{/copy}";
+
+    let limit = body
+        .char_indices()
+        .nth(char_offset.max(0) as usize)
+        .map(|(idx, _)| idx)
+        .unwrap_or(body.len());
+    let mut count = 0;
+    let mut byte_pos = 0;
+
+    while let Some(rel_open) = body[byte_pos..].find(COPY_OPEN) {
+        let open = byte_pos + rel_open;
+        let after_open = open + COPY_OPEN.len();
+        let Some(rel_close) = body[after_open..].find(COPY_CLOSE) else {
+            break;
+        };
+        if open < limit {
+            count += 1;
+        }
+        byte_pos = after_open + rel_close + COPY_CLOSE.len();
+    }
+
+    count
 }
 
 fn build_title(subtitle: &str) -> gtk::Box {
@@ -2377,8 +2780,15 @@ impl JotWindow {
     fn build_note_row(self: &Rc<Self>, note: &Note) -> gtk::ListBoxRow {
         let row = gtk::ListBoxRow::new();
 
-        // Outer = [text content (expand) | pin star]
+        // Outer = [color strip | text content (expand) | pin star]
         let outer = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+
+        let color_strip = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        color_strip.add_css_class("jot-row-color");
+        color_strip.add_css_class(&note_color_css_class(&note.color));
+        color_strip.set_vexpand(true);
+        color_strip.set_valign(gtk::Align::Fill);
+        outer.append(&color_strip);
 
         let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
         bx.set_hexpand(true);
@@ -2408,9 +2818,20 @@ impl JotWindow {
             .build();
         time.add_css_class("jot-row-time");
 
+        let tag_text = normalize_note_tag(&note.tag);
         bx.append(&title);
         if !snippet_text.is_empty() {
             bx.append(&snippet);
+        }
+        if !tag_text.is_empty() {
+            let tag = gtk::Label::builder()
+                .label(format!("#{tag_text}"))
+                .halign(gtk::Align::Start)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .lines(1)
+                .build();
+            tag.add_css_class("jot-row-tag");
+            bx.append(&tag);
         }
         bx.append(&time);
 
@@ -2464,5 +2885,198 @@ impl JotWindow {
             });
         }
         self.rebuild_list();
+    }
+
+    fn set_current_tag(self: &Rc<Self>, tag: String) {
+        let Some(id) = self.state.borrow().current_id else {
+            return;
+        };
+
+        let already_current = self
+            .state
+            .borrow()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .is_some_and(|n| n.tag == tag);
+        if already_current {
+            return;
+        }
+
+        if let Err(e) = self.db.set_tag(id, &tag) {
+            tracing::error!("set_tag failed: {e}");
+            self.toast_overlay.add_toast(
+                adw::Toast::builder()
+                    .title(format!("Tag update failed: {e}"))
+                    .timeout(4)
+                    .build(),
+            );
+            return;
+        }
+
+        if let Some(note) = self
+            .state
+            .borrow_mut()
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
+        {
+            note.tag = tag;
+        }
+        self.rebuild_tag_tabs();
+        self.rebuild_list();
+    }
+
+    fn set_current_color(self: &Rc<Self>, color: &str) {
+        let Some(id) = self.state.borrow().current_id else {
+            return;
+        };
+        let color = normalize_note_color(color);
+
+        let already_current = self
+            .state
+            .borrow()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .is_some_and(|n| normalize_note_color(&n.color) == color);
+        if already_current {
+            self.update_note_metadata_controls();
+            return;
+        }
+
+        if let Err(e) = self.db.set_color(id, &color) {
+            tracing::error!("set_color failed: {e}");
+            self.toast_overlay.add_toast(
+                adw::Toast::builder()
+                    .title(format!("Color update failed: {e}"))
+                    .timeout(4)
+                    .build(),
+            );
+            return;
+        }
+
+        if let Some(note) = self
+            .state
+            .borrow_mut()
+            .notes
+            .iter_mut()
+            .find(|n| n.id == id)
+        {
+            note.color = color;
+        }
+        self.update_note_metadata_controls();
+        self.rebuild_list();
+    }
+
+    fn update_note_metadata_controls(&self) {
+        let current = self.state.borrow().current_id;
+        let note = current.and_then(|id| {
+            self.state
+                .borrow()
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| (n.tag.clone(), normalize_note_color(&n.color)))
+        });
+
+        self.suppress.set(true);
+        match note {
+            Some((tag, color)) => {
+                self.tag_entry.set_sensitive(true);
+                self.tag_entry.set_text(&tag);
+                for (button_color, button) in self.color_buttons.borrow().iter() {
+                    button.set_sensitive(true);
+                    button.set_active(button_color == &color);
+                }
+            }
+            None => {
+                self.tag_entry.set_sensitive(false);
+                self.tag_entry.set_text("");
+                for (_, button) in self.color_buttons.borrow().iter() {
+                    button.set_sensitive(false);
+                    button.set_active(false);
+                }
+            }
+        }
+        self.suppress.set(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        collect_note_tags, copy_block_payload, copy_blocks_before_char_offset,
+        normalize_note_color, normalize_note_tag, note_matches_tag_filter, parse_markdown_body,
+        BodyPart,
+    };
+    use crate::note::Note;
+    use chrono::Utc;
+
+    fn note(tag: &str) -> Note {
+        Note {
+            id: 1,
+            title: String::new(),
+            body: String::new(),
+            tag: tag.to_string(),
+            color: String::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            pinned: false,
+        }
+    }
+
+    #[test]
+    fn parses_copy_blocks_alongside_text_and_images() {
+        assert_eq!(
+            parse_markdown_body("before {copy}hello{/copy}\n![image](/tmp/a.png)"),
+            vec![
+                BodyPart::Text("before ".to_string()),
+                BodyPart::CopyBlock("hello".to_string()),
+                BodyPart::Text("\n".to_string()),
+                BodyPart::Image("/tmp/a.png".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_unclosed_copy_blocks_as_text() {
+        assert_eq!(
+            parse_markdown_body("{copy}hello"),
+            vec![BodyPart::Text("{copy}hello".to_string())]
+        );
+    }
+
+    #[test]
+    fn normalizes_multiline_copy_payload_edges() {
+        assert_eq!(copy_block_payload("\nhello\n"), "hello");
+        assert_eq!(copy_block_payload("\r\nhello\r\n"), "hello");
+        assert_eq!(copy_block_payload("hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn counts_copy_anchors_inserted_before_cursor() {
+        let body = "a {copy}one{/copy} b {copy}two{/copy}";
+        assert_eq!(copy_blocks_before_char_offset(body, 1), 0);
+        assert_eq!(copy_blocks_before_char_offset(body, 20), 1);
+        assert_eq!(
+            copy_blocks_before_char_offset(body, body.chars().count() as i32),
+            2
+        );
+    }
+
+    #[test]
+    fn normalizes_tags_and_colors_for_filters() {
+        assert_eq!(normalize_note_tag("  Work\n"), "Work");
+        assert_eq!(normalize_note_color("purple"), "purple");
+        assert_eq!(normalize_note_color("chartreuse"), "");
+
+        let notes = vec![note("Work"), note("work"), note(""), note("Personal")];
+        let (tags, has_untagged) = collect_note_tags(&notes);
+        assert_eq!(tags, vec!["Personal".to_string(), "Work".to_string()]);
+        assert!(has_untagged);
+        assert!(note_matches_tag_filter(&notes[0], Some("work")));
+        assert!(note_matches_tag_filter(&notes[2], Some("")));
+        assert!(note_matches_tag_filter(&notes[3], None));
     }
 }

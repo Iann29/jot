@@ -69,6 +69,30 @@ window.jot-window > contents {
     background: #ffffff;
 }
 
+.jot-tag-tabs-scroll {
+    background: transparent;
+}
+.jot-tag-tabs {
+    padding: 6px 8px 2px 8px;
+}
+.jot-tag-tab {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.08);
+    border-radius: 8px;
+    color: alpha(#1b1c22, 0.68);
+    padding: 4px 8px;
+    min-height: 26px;
+}
+.jot-tag-tab:hover {
+    background: alpha(#000000, 0.07);
+    color: #1b1c22;
+}
+.jot-tag-tab-active {
+    background: alpha(#4a5cd1, 0.16);
+    border-color: alpha(#4a5cd1, 0.40);
+    color: #1b1c22;
+}
+
 .jot-list {
     background: transparent;
     padding: 4px 6px 8px 6px;
@@ -108,6 +132,16 @@ window.jot-window > contents {
     font-feature-settings: "tnum";
     margin-top: 4px;
 }
+.jot-row-tag {
+    font-size: 10px;
+    color: alpha(#4a5cd1, 0.82);
+    margin-top: 3px;
+}
+.jot-row-color {
+    min-width: 4px;
+    border-radius: 4px;
+    background: alpha(#000000, 0.10);
+}
 
 /* Editor area */
 .jot-editor-shell {
@@ -136,6 +170,45 @@ window.jot-window > contents {
     font-size: 14px;
     font-style: italic;
 }
+
+.jot-note-meta {
+    margin-top: 8px;
+    margin-bottom: 4px;
+}
+.jot-tag-entry {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.08);
+    border-radius: 8px;
+    color: #1b1c22;
+    min-height: 28px;
+    padding: 2px 8px;
+}
+.jot-tag-entry:focus-within {
+    border-color: alpha(#4a5cd1, 0.55);
+    background: #ffffff;
+}
+.jot-color-palette {
+    margin-top: 2px;
+}
+.jot-color-swatch {
+    border-radius: 6px;
+    border: 1px solid alpha(#000000, 0.18);
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+}
+.jot-color-swatch:checked {
+    border-color: #1b1c22;
+    box-shadow: 0 0 0 2px alpha(#4a5cd1, 0.30);
+}
+.jot-color-default { background: alpha(#000000, 0.08); }
+.jot-color-red     { background: #e02050; }
+.jot-color-orange  { background: #e66a13; }
+.jot-color-yellow  { background: #d99a18; }
+.jot-color-green   { background: #16a34a; }
+.jot-color-blue    { background: #4a5cd1; }
+.jot-color-purple  { background: #8b5cf6; }
+.jot-color-pink    { background: #db2777; }
 
 /* Buttons */
 .jot-headerbar button {
@@ -216,6 +289,37 @@ window.jot-window > contents {
 }
 .jot-inline-image:hover {
     box-shadow: 0 4px 18px alpha(#000000, 0.20);
+}
+
+.jot-copy-block {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.08);
+    border-radius: 8px;
+    margin: 8px 0;
+    padding: 10px 12px;
+}
+.jot-copy-title {
+    color: alpha(#1b1c22, 0.58);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+}
+.jot-copy-button {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.10);
+    border-radius: 6px;
+    color: #1b1c22;
+    min-height: 24px;
+    min-width: 26px;
+    padding: 2px 6px;
+}
+.jot-copy-button:hover {
+    background: alpha(#000000, 0.08);
+}
+.jot-copy-text {
+    color: #1b1c22;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 12px;
 }
 
 .jot-image-preview {

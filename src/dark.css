@@ -59,6 +59,30 @@ window.jot-window > contents {
     background: alpha(#ffffff, 0.06);
 }
 
+.jot-tag-tabs-scroll {
+    background: transparent;
+}
+.jot-tag-tabs {
+    padding: 6px 8px 2px 8px;
+}
+.jot-tag-tab {
+    background: alpha(#ffffff, 0.04);
+    border: 1px solid alpha(#ffffff, 0.06);
+    border-radius: 8px;
+    color: alpha(#e6e6ea, 0.68);
+    padding: 4px 8px;
+    min-height: 26px;
+}
+.jot-tag-tab:hover {
+    background: alpha(#ffffff, 0.08);
+    color: #e6e6ea;
+}
+.jot-tag-tab-active {
+    background: alpha(#7c8cff, 0.20);
+    border-color: alpha(#7c8cff, 0.42);
+    color: #ffffff;
+}
+
 .jot-list {
     background: transparent;
     padding: 4px 6px 8px 6px;
@@ -98,6 +122,16 @@ window.jot-window > contents {
     font-feature-settings: "tnum";
     margin-top: 4px;
 }
+.jot-row-tag {
+    font-size: 10px;
+    color: alpha(#8a99ff, 0.82);
+    margin-top: 3px;
+}
+.jot-row-color {
+    min-width: 4px;
+    border-radius: 4px;
+    background: alpha(#ffffff, 0.08);
+}
 
 /* Editor area */
 .jot-editor-shell {
@@ -126,6 +160,45 @@ window.jot-window > contents {
     font-size: 14px;
     font-style: italic;
 }
+
+.jot-note-meta {
+    margin-top: 8px;
+    margin-bottom: 4px;
+}
+.jot-tag-entry {
+    background: alpha(#ffffff, 0.04);
+    border: 1px solid alpha(#ffffff, 0.06);
+    border-radius: 8px;
+    color: #e6e6ea;
+    min-height: 28px;
+    padding: 2px 8px;
+}
+.jot-tag-entry:focus-within {
+    border-color: alpha(#7c8cff, 0.55);
+    background: alpha(#ffffff, 0.06);
+}
+.jot-color-palette {
+    margin-top: 2px;
+}
+.jot-color-swatch {
+    border-radius: 6px;
+    border: 1px solid alpha(#ffffff, 0.16);
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+}
+.jot-color-swatch:checked {
+    border-color: #ffffff;
+    box-shadow: 0 0 0 2px alpha(#7c8cff, 0.45);
+}
+.jot-color-default { background: alpha(#ffffff, 0.08); }
+.jot-color-red     { background: #ff5470; }
+.jot-color-orange  { background: #f97316; }
+.jot-color-yellow  { background: #ffd166; }
+.jot-color-green   { background: #4ade80; }
+.jot-color-blue    { background: #7c8cff; }
+.jot-color-purple  { background: #c084fc; }
+.jot-color-pink    { background: #f472b6; }
 
 /* Buttons */
 .jot-headerbar button {
@@ -206,6 +279,37 @@ window.jot-window > contents {
 }
 .jot-inline-image:hover {
     box-shadow: 0 4px 18px alpha(#000000, 0.55);
+}
+
+.jot-copy-block {
+    background: alpha(#ffffff, 0.055);
+    border: 1px solid alpha(#ffffff, 0.09);
+    border-radius: 8px;
+    margin: 8px 0;
+    padding: 10px 12px;
+}
+.jot-copy-title {
+    color: alpha(#e6e6ea, 0.62);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+}
+.jot-copy-button {
+    background: alpha(#ffffff, 0.06);
+    border: 1px solid alpha(#ffffff, 0.08);
+    border-radius: 6px;
+    color: #e6e6ea;
+    min-height: 24px;
+    min-width: 26px;
+    padding: 2px 6px;
+}
+.jot-copy-button:hover {
+    background: alpha(#ffffff, 0.10);
+}
+.jot-copy-text {
+    color: #e6e6ea;
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 12px;
 }
 
 .jot-image-preview {

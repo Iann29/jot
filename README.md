@@ -27,7 +27,8 @@ Single binary. ~5 MB of RAM at rest. Instant startup. One keystroke up, one keys
 | **Floating, always-on-top** <br/> Pops over any app on any workspace. Translucent so you can still see what's behind. | **Native, fast, tiny** <br/> Rust + GTK 4 + libadwaita. Single binary, ~5 MB RAM, native Wayland. | **Auto-save everything** <br/> Debounced save on every keystroke. SQLite-backed, daily backups. |
 | **Light & dark themes** <br/> Pick System / Light / Dark. Follows runtime flips of the desktop preference. | **Markdown rendering** <br/> Live-styles `**bold**`, `*italic*`, `# headings`, `` `code` ``, lists — without hiding the source. | **Search** <br/> Filter the sidebar by title and body content. `Ctrl+F` and start typing. |
 | **Paste / drop images** <br/> `Ctrl+V` or drag from your file manager. Inline preview with click-to-zoom. | **Click-to-zoom canvas** <br/> Click any inline image. Drag to pan, `Ctrl+Scroll` to zoom anchored at the cursor. | **Voice transcription** <br/> Dictate with the mic. Powered by Groq Whisper Large v3 Turbo (~216× real-time). |
-| **Pinned notes & undo** <br/> Pin to the top, restore deleted notes from a toast, full text-undo per note. | **Export as Markdown** <br/> Single note or bulk; bundles inline images into a sibling `images/` directory. | **Launcher-friendly** <br/> Desktop entry registered. Type "jot" in Walker, Rofi, GNOME Shell, etc. |
+| **Pinned, tagged & colored notes** <br/> Pin to the top, group notes into sidebar tabs, and add color strips for fast scanning. | **Export as Markdown** <br/> Single note or bulk; bundles inline images into a sibling `images/` directory. | **Launcher-friendly** <br/> Desktop entry registered. Type "jot" in Walker, Rofi, GNOME Shell, etc. |
+| **Copy blocks** <br/> Wrap reusable text in `{copy}...{/copy}` and Jot renders it with a one-click clipboard button. |  |  |
 
 ## Install
 
@@ -35,8 +36,8 @@ Single binary. ~5 MB of RAM at rest. Instant startup. One keystroke up, one keys
 
 ```bash
 sudo pacman -S --needed gtk4 libadwaita sqlite alsa-lib
-curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/latest/download/jot-v1.1.1-x86_64-linux.tar.gz
-tar -xzf jot.tar.gz && cd jot-v1.1.1-x86_64-linux && ./install.sh
+curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/download/v1.3.0/jot-v1.3.0-x86_64-linux.tar.gz
+tar -xzf jot.tar.gz && cd jot-v1.3.0-x86_64-linux && ./install.sh
 ```
 
 Drops `jot` into `~/.local/bin`, the desktop entry into `~/.local/share/applications`, the icon into `~/.local/share/icons/hicolor/scalable/apps`. Make sure `~/.local/bin` is on your `PATH`.
@@ -152,6 +153,18 @@ Sierra2_4a dithering. The Kooha-killer.
 | `Esc`              | Close zoom / hide window              |
 
 The first non-image, non-empty line of every note becomes its title automatically. Notes are saved ~400 ms after your last keystroke.
+
+Use the tag field above the editor to group notes into tabs in the sidebar. The color swatches next to it add a visible strip to each note row, including search results.
+
+Reusable snippets can be written as:
+
+```text
+{copy}
+message or command to copy
+{/copy}
+```
+
+Once saved, the snippet renders as a copy block with a clipboard button while the raw text remains in the note for export and sync-safe storage.
 
 ## Where things live
 

@@ -69,8 +69,10 @@ fn yaml_escape(s: &str) -> String {
 
 fn frontmatter(note: &Note) -> String {
     format!(
-        "---\ntitle: {}\nupdated: {}\ncreated: {}\npinned: {}\n---\n\n",
+        "---\ntitle: {}\ntag: {}\ncolor: {}\nupdated: {}\ncreated: {}\npinned: {}\n---\n\n",
         yaml_escape(&note.title),
+        yaml_escape(&note.tag),
+        yaml_escape(&note.color),
         note.updated_at,
         note.created_at,
         note.pinned,
@@ -211,4 +213,30 @@ fn zip_dir(src: &Path, zip_path: &Path) -> Result<()> {
     }
     zw.finish()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frontmatter;
+    use crate::note::Note;
+    use chrono::Utc;
+
+    #[test]
+    fn frontmatter_includes_tag_and_color() {
+        let note = Note {
+            id: 42,
+            title: "Deploy".to_string(),
+            body: String::new(),
+            tag: "work".to_string(),
+            color: "purple".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            pinned: true,
+        };
+
+        let fm = frontmatter(&note);
+        assert!(fm.contains("tag: work\n"));
+        assert!(fm.contains("color: purple\n"));
+        assert!(fm.contains("pinned: true\n"));
+    }
 }
