@@ -27,6 +27,8 @@ pub struct Config {
     /// subsequent sessions reuse this. None = ask again next time.
     pub recorder_overlay_x: Option<i32>,
     pub recorder_overlay_y: Option<i32>,
+    /// Whether the note tag/color controls are collapsed in the editor header.
+    pub note_meta_collapsed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +67,7 @@ impl Default for Config {
             gif_quality: GifQuality::Balanced,
             recorder_overlay_x: None,
             recorder_overlay_y: None,
+            note_meta_collapsed: false,
         }
     }
 }

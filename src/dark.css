@@ -33,6 +33,22 @@ window.jot-window > contents {
     color: alpha(#e6e6ea, 0.5);
     font-feature-settings: "tnum";
 }
+.jot-subtitle-row {
+    margin-top: 0;
+}
+.jot-meta-toggle {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    color: alpha(#e6e6ea, 0.45);
+    min-height: 18px;
+    min-width: 18px;
+    padding: 0;
+}
+.jot-meta-toggle:hover {
+    background: alpha(#ffffff, 0.06);
+    color: #e6e6ea;
+}
 
 /* Sidebar */
 .jot-sidebar {
@@ -61,6 +77,19 @@ window.jot-window > contents {
 
 .jot-tag-tabs-scroll {
     background: transparent;
+}
+.jot-tag-tabs-scroll > scrollbar,
+.jot-tag-tabs-scroll undershoot,
+.jot-tag-tabs-scroll overshoot {
+    min-height: 0;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    opacity: 0;
+}
+.jot-tag-tabs-scroll > scrollbar.horizontal {
+    margin: 0;
+    padding: 0;
 }
 .jot-tag-tabs {
     padding: 6px 8px 2px 8px;

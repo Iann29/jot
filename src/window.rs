@@ -52,6 +52,8 @@ pub struct JotWindow {
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
     tag_tabs: gtk::Box,
+    note_meta: gtk::Box,
+    note_meta_toggle: gtk::Button,
     tag_entry: gtk::Entry,
     color_buttons: RefCell<Vec<(String, gtk::ToggleButton)>>,
     search_entry: gtk::SearchEntry,
@@ -216,8 +218,22 @@ impl JotWindow {
         let subtitle_label = gtk::Label::builder()
             .label("")
             .halign(gtk::Align::Start)
+            .hexpand(true)
             .build();
         subtitle_label.add_css_class("jot-subtitle");
+
+        let note_meta_toggle = gtk::Button::builder()
+            .icon_name("pan-down-symbolic")
+            .has_frame(false)
+            .tooltip_text("Hide note tag and color controls")
+            .build();
+        note_meta_toggle.add_css_class("jot-meta-toggle");
+        note_meta_toggle.set_cursor_from_name(Some("pointer"));
+
+        let subtitle_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        subtitle_row.add_css_class("jot-subtitle-row");
+        subtitle_row.append(&subtitle_label);
+        subtitle_row.append(&note_meta_toggle);
 
         let tag_entry = gtk::Entry::builder()
             .placeholder_text("Tag")
@@ -255,7 +271,7 @@ impl JotWindow {
         title_box.set_margin_top(10);
         title_box.set_margin_bottom(2);
         title_box.append(&title_label);
-        title_box.append(&subtitle_label);
+        title_box.append(&subtitle_row);
         title_box.append(&note_meta);
 
         let buffer = gtk::TextBuffer::new(None);
@@ -365,6 +381,8 @@ impl JotWindow {
             subtitle_label,
             placeholder,
             tag_tabs: tag_tabs.clone(),
+            note_meta: note_meta.clone(),
+            note_meta_toggle: note_meta_toggle.clone(),
             tag_entry: tag_entry.clone(),
             color_buttons: RefCell::new(color_buttons),
             search_entry: search_entry.clone(),
@@ -391,6 +409,7 @@ impl JotWindow {
         // Wire callbacks
         this.connect_callbacks(&new_btn, &delete_btn, &settings_btn, &close_btn);
         this.connect_metadata_controls();
+        this.apply_note_meta_visibility();
         let win = this.clone();
         export_btn.connect_clicked(move |_| win.export_current_note());
 
@@ -526,6 +545,10 @@ impl JotWindow {
     }
 
     fn connect_metadata_controls(self: &Rc<Self>) {
+        let win = self.clone();
+        self.note_meta_toggle
+            .connect_clicked(move |_| win.toggle_note_meta());
+
         let win = self.clone();
         self.tag_entry.connect_changed(move |entry| {
             if win.suppress.get() {
@@ -1502,6 +1525,32 @@ impl JotWindow {
         self.theme_controller.set_opacity(opacity);
     }
 
+    fn toggle_note_meta(self: &Rc<Self>) {
+        let config = {
+            let mut state = self.state.borrow_mut();
+            state.config.note_meta_collapsed = !state.config.note_meta_collapsed;
+            state.config.clone()
+        };
+        if let Err(e) = config.save() {
+            tracing::warn!("save note metadata collapse state failed: {e}");
+        }
+        self.apply_note_meta_visibility();
+    }
+
+    fn apply_note_meta_visibility(&self) {
+        let collapsed = self.state.borrow().config.note_meta_collapsed;
+        self.note_meta.set_visible(!collapsed);
+        if collapsed {
+            self.note_meta_toggle.set_icon_name("pan-end-symbolic");
+            self.note_meta_toggle
+                .set_tooltip_text(Some("Show note tag and color controls"));
+        } else {
+            self.note_meta_toggle.set_icon_name("pan-down-symbolic");
+            self.note_meta_toggle
+                .set_tooltip_text(Some("Hide note tag and color controls"));
+        }
+    }
+
     fn apply_font_size(&self) {
         let size = self.state.borrow().config.font_size;
         let css = format!(
@@ -1641,7 +1690,11 @@ impl JotWindow {
                 return false;
             };
             let char_offset = text[..open].chars().count() as i32;
-            let iter = self.buffer.iter_at_offset(char_offset);
+            // Query inside the hidden source range, not exactly at its left
+            // boundary. GTK tag state at a toggle boundary can read as off,
+            // which would make autosave re-render every existing copy block
+            // and yank the editor scroll position.
+            let iter = self.buffer.iter_at_offset(char_offset + 1);
             if !iter.has_tag(&self.copy_tag) {
                 return true;
             }
@@ -1686,6 +1739,7 @@ impl JotWindow {
             .tooltip_text("Copy block to clipboard")
             .build();
         copy_btn.add_css_class("jot-copy-button");
+        copy_btn.set_cursor_from_name(Some("pointer"));
         header.append(&title);
         header.append(&copy_btn);
 
@@ -1918,6 +1972,13 @@ impl JotWindow {
         raw.replace('\u{FFFC}', "")
     }
 
+    fn buffer_has_child_anchors(&self) -> bool {
+        self.buffer
+            .text(&self.buffer.start_iter(), &self.buffer.end_iter(), true)
+            .to_string()
+            .contains('\u{FFFC}')
+    }
+
     /// Strip then re-apply the URL underline tag across the whole buffer.
     /// Cheap enough to run on every load and after each autosave.
     fn refresh_url_tags(&self) {
@@ -1981,6 +2042,9 @@ impl JotWindow {
             if !mods.contains(gdk::ModifierType::CONTROL_MASK) {
                 return;
             }
+            if win.buffer_has_child_anchors() {
+                return;
+            }
             let (bx, by) =
                 tv.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
             if let Some(iter) = tv.iter_at_location(bx, by) {
@@ -2035,8 +2099,8 @@ impl JotWindow {
         // It only matters for the "pointer" cursor decision, and the GTK
         // call has triggered crashes with certain buffer states (mix of
         // visible/invisible runs around child anchors). Limiting it to
-        // the moments we actually care about both avoids the crash and
-        // saves a query on every mouse move.
+        // safe buffers and the moments we actually care about avoids the
+        // crash and saves a query on every mouse move.
         let want_pointer = self.ctrl_held.get()
             && match self.pointer_pos.get() {
                 Some((x, y)) => self.is_pointer_over_url(x, y),
@@ -2048,6 +2112,9 @@ impl JotWindow {
 
     fn is_pointer_over_url(&self, x: f64, y: f64) -> bool {
         if self.buffer.char_count() == 0 {
+            return false;
+        }
+        if self.buffer_has_child_anchors() {
             return false;
         }
         let (bx, by) =
