@@ -189,6 +189,10 @@ impl JotWindow {
             .min_content_height(38)
             .build();
         tag_scroller.add_css_class("jot-tag-tabs-scroll");
+        // The horizontal overlay scrollbar sits on top of the tag tabs and
+        // would intercept clicks even when hidden via CSS. Make it
+        // non-targetable so clicks pass through to the tabs beneath.
+        tag_scroller.hscrollbar().set_can_target(false);
 
         let list_box = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
