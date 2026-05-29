@@ -54,7 +54,12 @@ pub struct JotWindow {
     tag_tabs: gtk::Box,
     note_meta: gtk::Box,
     note_meta_toggle: gtk::Button,
-    tag_entry: gtk::Entry,
+    tag_picker_button: gtk::MenuButton,
+    tag_picker_label: gtk::Label,
+    tag_picker_popover: gtk::Popover,
+    tag_picker_search: gtk::SearchEntry,
+    tag_picker_list: gtk::ListBox,
+    tag_picker_actions: RefCell<Vec<TagPickerAction>>,
     color_buttons: RefCell<Vec<(String, gtk::ToggleButton)>>,
     search_entry: gtk::SearchEntry,
     mic_btn: gtk::Button,
@@ -83,6 +88,12 @@ struct VoiceSession {
     next_to_emit: u64,
     /// True once Recording event arrived; UI can flip cursor / status.
     started: bool,
+}
+
+#[derive(Debug, Clone)]
+enum TagPickerAction {
+    Apply(String),
+    Create(String),
 }
 
 struct State {
@@ -239,12 +250,67 @@ impl JotWindow {
         subtitle_row.append(&subtitle_label);
         subtitle_row.append(&note_meta_toggle);
 
-        let tag_entry = gtk::Entry::builder()
-            .placeholder_text("Tag")
-            .width_chars(14)
+        let tag_picker_label = gtk::Label::builder()
+            .label("Add tag…")
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .hexpand(true)
+            .build();
+        tag_picker_label.add_css_class("jot-tag-picker-label");
+
+        let tag_picker_icon = gtk::Image::from_icon_name("tag-outline-symbolic");
+        tag_picker_icon.add_css_class("jot-tag-picker-icon");
+        let tag_picker_chevron = gtk::Image::from_icon_name("pan-down-symbolic");
+        tag_picker_chevron.add_css_class("jot-tag-picker-chevron");
+
+        let tag_picker_button_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        tag_picker_button_content.append(&tag_picker_icon);
+        tag_picker_button_content.append(&tag_picker_label);
+        tag_picker_button_content.append(&tag_picker_chevron);
+
+        let tag_picker_button = gtk::MenuButton::builder()
+            .child(&tag_picker_button_content)
             .sensitive(false)
             .build();
-        tag_entry.add_css_class("jot-tag-entry");
+        tag_picker_button.add_css_class("jot-tag-picker");
+        tag_picker_button.set_size_request(160, -1);
+
+        let tag_picker_search = gtk::SearchEntry::builder()
+            .placeholder_text("Search or create…")
+            .build();
+        tag_picker_search.add_css_class("jot-tag-picker-search");
+
+        let tag_picker_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::Single)
+            .build();
+        tag_picker_list.add_css_class("jot-tag-picker-list");
+
+        let tag_picker_scroll = gtk::ScrolledWindow::builder()
+            .child(&tag_picker_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .min_content_height(60)
+            .max_content_height(260)
+            .propagate_natural_height(true)
+            .build();
+        tag_picker_scroll.add_css_class("jot-tag-picker-scroll");
+
+        let tag_picker_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        tag_picker_box.set_margin_start(6);
+        tag_picker_box.set_margin_end(6);
+        tag_picker_box.set_margin_top(6);
+        tag_picker_box.set_margin_bottom(6);
+        tag_picker_box.append(&tag_picker_search);
+        tag_picker_box.append(&tag_picker_scroll);
+
+        let tag_picker_popover = gtk::Popover::builder()
+            .child(&tag_picker_box)
+            .has_arrow(false)
+            .position(gtk::PositionType::Bottom)
+            .build();
+        tag_picker_popover.add_css_class("jot-tag-picker-popover");
+        tag_picker_popover.set_size_request(260, -1);
+        tag_picker_button.set_popover(Some(&tag_picker_popover));
 
         let color_palette = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         color_palette.add_css_class("jot-color-palette");
@@ -267,7 +333,7 @@ impl JotWindow {
 
         let note_meta = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         note_meta.add_css_class("jot-note-meta");
-        note_meta.append(&tag_entry);
+        note_meta.append(&tag_picker_button);
         note_meta.append(&color_palette);
 
         let title_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -387,7 +453,12 @@ impl JotWindow {
             tag_tabs: tag_tabs.clone(),
             note_meta: note_meta.clone(),
             note_meta_toggle: note_meta_toggle.clone(),
-            tag_entry: tag_entry.clone(),
+            tag_picker_button: tag_picker_button.clone(),
+            tag_picker_label: tag_picker_label.clone(),
+            tag_picker_popover: tag_picker_popover.clone(),
+            tag_picker_search: tag_picker_search.clone(),
+            tag_picker_list: tag_picker_list.clone(),
+            tag_picker_actions: RefCell::new(Vec::new()),
             color_buttons: RefCell::new(color_buttons),
             search_entry: search_entry.clone(),
             mic_btn: mic_btn.clone(),
@@ -454,12 +525,17 @@ impl JotWindow {
             st.config.height = w.default_height();
         });
 
-        // Persist config when window closes
+        // Close request (window X, compositor "close window" / Hyprland
+        // Super+W) hides instead of quitting. Jot is a resident, toggle-style
+        // app — quitting the process would drop the Wayland clipboard offer,
+        // so text copied from Jot couldn't be pasted anywhere once the window
+        // closed. Matches Esc and the header close button, which already hide.
         let win = this.clone();
         window.connect_close_request(move |_| {
             win.save_pending();
             let _ = win.state.borrow().config.save();
-            glib::Propagation::Proceed
+            win.window.set_visible(false);
+            glib::Propagation::Stop
         });
 
         // Sweep orphan images once the UI has settled. `idle_add_local_once`
@@ -554,12 +630,48 @@ impl JotWindow {
             .connect_clicked(move |_| win.toggle_note_meta());
 
         let win = self.clone();
-        self.tag_entry.connect_changed(move |entry| {
-            if win.suppress.get() {
-                return;
-            }
-            win.set_current_tag(normalize_note_tag(&entry.text()));
+        self.tag_picker_popover.connect_show(move |_| {
+            win.tag_picker_search.set_text("");
+            win.refresh_tag_picker_list();
+            win.tag_picker_search.grab_focus();
         });
+
+        let win = self.clone();
+        self.tag_picker_search.connect_search_changed(move |_| {
+            win.refresh_tag_picker_list();
+        });
+
+        let win = self.clone();
+        self.tag_picker_search.connect_activate(move |_| {
+            win.activate_selected_tag_picker_row();
+        });
+
+        let win = self.clone();
+        let key_ctrl = gtk::EventControllerKey::new();
+        key_ctrl.connect_key_pressed(move |_, key, _, _| {
+            match key {
+                gdk::Key::Down => {
+                    win.move_tag_picker_selection(1);
+                    glib::Propagation::Stop
+                }
+                gdk::Key::Up => {
+                    win.move_tag_picker_selection(-1);
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.tag_picker_search.add_controller(key_ctrl);
+
+        let win = self.clone();
+        self.tag_picker_list
+            .connect_row_activated(move |_, row| {
+                let idx = row.index() as usize;
+                let action = win.tag_picker_actions.borrow().get(idx).cloned();
+                if let Some(action) = action {
+                    win.apply_tag_picker_action(action);
+                }
+            });
 
         let color_buttons = self.color_buttons.borrow().clone();
         for (color, button) in color_buttons {
@@ -1376,6 +1488,22 @@ impl JotWindow {
         let Some(id) = current else { return };
 
         let body = self.extract_body_for_save();
+        // Bail out when the buffer still matches what's stored for this note.
+        // select_note() saves the outgoing note before switching, so without
+        // this guard a no-op save would rewrite updated_at and bump the
+        // untouched note to the top of the recency-sorted sidebar — making
+        // the list reshuffle every time you click a different note.
+        let unchanged = self
+            .state
+            .borrow()
+            .notes
+            .iter()
+            .find(|n| n.id == id)
+            .is_some_and(|n| n.body == body);
+        if unchanged {
+            return;
+        }
+
         let title = Note::derive_title(&body);
 
         if let Err(e) = self.db.update_note(id, &title, &body) {
@@ -2657,6 +2785,29 @@ fn note_color_css_class(color: &str) -> String {
     }
 }
 
+fn collect_note_tags_with_counts(notes: &[Note]) -> Vec<(String, usize)> {
+    let mut tags: Vec<(String, usize)> = Vec::new();
+    for note in notes {
+        let tag = normalize_note_tag(&note.tag);
+        if tag.is_empty() {
+            continue;
+        }
+        if let Some(existing) = tags
+            .iter_mut()
+            .find(|(t, _)| t.eq_ignore_ascii_case(&tag))
+        {
+            existing.1 += 1;
+        } else {
+            tags.push((tag, 1));
+        }
+    }
+    tags.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+    tags
+}
+
 fn collect_note_tags(notes: &[Note]) -> (Vec<String>, bool) {
     let mut tags: Vec<String> = Vec::new();
     let mut has_untagged = false;
@@ -2992,10 +3143,198 @@ impl JotWindow {
             .iter_mut()
             .find(|n| n.id == id)
         {
-            note.tag = tag;
+            note.tag = tag.clone();
         }
+        self.update_tag_picker_label(&tag);
         self.rebuild_tag_tabs();
         self.rebuild_list();
+    }
+
+    fn update_tag_picker_label(&self, tag: &str) {
+        if tag.is_empty() {
+            self.tag_picker_label.set_text("Add tag…");
+            self.tag_picker_label.add_css_class("jot-tag-picker-label-empty");
+        } else {
+            self.tag_picker_label.set_text(tag);
+            self.tag_picker_label.remove_css_class("jot-tag-picker-label-empty");
+        }
+    }
+
+    fn current_note_tag(&self) -> String {
+        let state = self.state.borrow();
+        state
+            .current_id
+            .and_then(|id| state.notes.iter().find(|n| n.id == id))
+            .map(|n| normalize_note_tag(&n.tag))
+            .unwrap_or_default()
+    }
+
+    fn refresh_tag_picker_list(self: &Rc<Self>) {
+        while let Some(child) = self.tag_picker_list.first_child() {
+            self.tag_picker_list.remove(&child);
+        }
+        self.tag_picker_actions.borrow_mut().clear();
+
+        let query = self.tag_picker_search.text().to_string();
+        let query_trim = query.trim();
+        let query_lower = query_trim.to_lowercase();
+
+        let all = collect_note_tags_with_counts(&self.state.borrow().notes);
+        let current = self.current_note_tag();
+        let current_lower = current.to_lowercase();
+
+        if query_lower.is_empty() || "no tag".contains(&query_lower) {
+            let row = self.build_tag_picker_row(None, 0, current.is_empty());
+            self.tag_picker_list.append(&row);
+            self.tag_picker_actions
+                .borrow_mut()
+                .push(TagPickerAction::Apply(String::new()));
+        }
+
+        let mut has_exact = false;
+        for (tag, count) in &all {
+            if !query_lower.is_empty() && !tag.to_lowercase().contains(&query_lower) {
+                continue;
+            }
+            if tag.to_lowercase() == query_lower {
+                has_exact = true;
+            }
+            let is_current = tag.to_lowercase() == current_lower;
+            let row = self.build_tag_picker_row(Some(tag.clone()), *count, is_current);
+            self.tag_picker_list.append(&row);
+            self.tag_picker_actions
+                .borrow_mut()
+                .push(TagPickerAction::Apply(tag.clone()));
+        }
+
+        if !query_trim.is_empty() && !has_exact {
+            let normalized = normalize_note_tag(query_trim);
+            if !normalized.is_empty() {
+                let row = self.build_tag_picker_create_row(&normalized);
+                self.tag_picker_list.append(&row);
+                self.tag_picker_actions
+                    .borrow_mut()
+                    .push(TagPickerAction::Create(normalized));
+            }
+        }
+
+        if let Some(first) = self.tag_picker_list.row_at_index(0) {
+            self.tag_picker_list.select_row(Some(&first));
+        }
+    }
+
+    fn build_tag_picker_row(
+        self: &Rc<Self>,
+        tag: Option<String>,
+        count: usize,
+        is_current: bool,
+    ) -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::new();
+        row.add_css_class("jot-tag-picker-row");
+        if is_current {
+            row.add_css_class("jot-tag-picker-row-active");
+        }
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        hbox.set_margin_start(8);
+        hbox.set_margin_end(8);
+        hbox.set_margin_top(4);
+        hbox.set_margin_bottom(4);
+
+        let icon_name = if tag.is_none() {
+            "edit-clear-symbolic"
+        } else {
+            "tag-outline-symbolic"
+        };
+        let icon = gtk::Image::from_icon_name(icon_name);
+        icon.add_css_class("jot-tag-picker-row-icon");
+        hbox.append(&icon);
+
+        let label = gtk::Label::builder()
+            .label(tag.clone().unwrap_or_else(|| "No tag".to_string()))
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        if tag.is_none() {
+            label.add_css_class("jot-tag-picker-row-clear");
+        }
+        hbox.append(&label);
+
+        if tag.is_some() && count > 0 {
+            let count_label = gtk::Label::new(Some(&count.to_string()));
+            count_label.add_css_class("jot-tag-picker-count");
+            hbox.append(&count_label);
+        }
+
+        if is_current {
+            let check = gtk::Image::from_icon_name("object-select-symbolic");
+            check.add_css_class("jot-tag-picker-check");
+            hbox.append(&check);
+        }
+
+        row.set_child(Some(&hbox));
+        row
+    }
+
+    fn build_tag_picker_create_row(self: &Rc<Self>, tag: &str) -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::new();
+        row.add_css_class("jot-tag-picker-row");
+        row.add_css_class("jot-tag-picker-row-create");
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        hbox.set_margin_start(8);
+        hbox.set_margin_end(8);
+        hbox.set_margin_top(4);
+        hbox.set_margin_bottom(4);
+
+        let icon = gtk::Image::from_icon_name("list-add-symbolic");
+        icon.add_css_class("jot-tag-picker-row-icon");
+        hbox.append(&icon);
+
+        let label = gtk::Label::builder()
+            .label(format!("Create \"{tag}\""))
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        hbox.append(&label);
+
+        row.set_child(Some(&hbox));
+        row
+    }
+
+    fn move_tag_picker_selection(self: &Rc<Self>, delta: i32) {
+        let current_idx = self
+            .tag_picker_list
+            .selected_row()
+            .map(|r| r.index())
+            .unwrap_or(-1);
+        let mut target = current_idx + delta;
+        if target < 0 {
+            target = 0;
+        }
+        if let Some(row) = self.tag_picker_list.row_at_index(target) {
+            self.tag_picker_list.select_row(Some(&row));
+        }
+    }
+
+    fn activate_selected_tag_picker_row(self: &Rc<Self>) {
+        let idx = match self.tag_picker_list.selected_row() {
+            Some(row) => row.index() as usize,
+            None => return,
+        };
+        let action = self.tag_picker_actions.borrow().get(idx).cloned();
+        if let Some(action) = action {
+            self.apply_tag_picker_action(action);
+        }
+    }
+
+    fn apply_tag_picker_action(self: &Rc<Self>, action: TagPickerAction) {
+        let target = match action {
+            TagPickerAction::Apply(tag) => tag,
+            TagPickerAction::Create(tag) => tag,
+        };
+        self.tag_picker_popover.popdown();
+        self.set_current_tag(normalize_note_tag(&target));
     }
 
     fn set_current_color(self: &Rc<Self>, color: &str) {
@@ -3054,16 +3393,16 @@ impl JotWindow {
         self.suppress.set(true);
         match note {
             Some((tag, color)) => {
-                self.tag_entry.set_sensitive(true);
-                self.tag_entry.set_text(&tag);
+                self.tag_picker_button.set_sensitive(true);
+                self.update_tag_picker_label(&tag);
                 for (button_color, button) in self.color_buttons.borrow().iter() {
                     button.set_sensitive(true);
                     button.set_active(button_color == &color);
                 }
             }
             None => {
-                self.tag_entry.set_sensitive(false);
-                self.tag_entry.set_text("");
+                self.tag_picker_button.set_sensitive(false);
+                self.update_tag_picker_label("");
                 for (_, button) in self.color_buttons.borrow().iter() {
                     button.set_sensitive(false);
                     button.set_active(false);

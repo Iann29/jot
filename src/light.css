@@ -216,6 +216,108 @@ window.jot-window > contents {
     border-color: alpha(#4a5cd1, 0.55);
     background: #ffffff;
 }
+.jot-tag-picker {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.08);
+    border-radius: 8px;
+    color: #1b1c22;
+    min-height: 28px;
+    padding: 2px 8px;
+    box-shadow: none;
+}
+.jot-tag-picker:hover {
+    background: alpha(#000000, 0.06);
+    border-color: alpha(#000000, 0.14);
+}
+.jot-tag-picker:checked,
+.jot-tag-picker:active {
+    background: alpha(#4a5cd1, 0.14);
+    border-color: alpha(#4a5cd1, 0.42);
+}
+.jot-tag-picker:disabled {
+    opacity: 0.45;
+}
+.jot-tag-picker-icon,
+.jot-tag-picker-chevron {
+    color: alpha(#1b1c22, 0.55);
+    -gtk-icon-size: 14px;
+}
+.jot-tag-picker-label {
+    color: #1b1c22;
+    font-size: 13px;
+}
+.jot-tag-picker-label-empty {
+    color: alpha(#1b1c22, 0.42);
+    font-style: italic;
+}
+.jot-tag-picker-popover > contents {
+    background: #ffffff;
+    border: 1px solid alpha(#000000, 0.10);
+    border-radius: 12px;
+    padding: 0;
+    box-shadow: 0 12px 32px alpha(#000000, 0.18);
+}
+.jot-tag-picker-search {
+    background: alpha(#000000, 0.04);
+    border: 1px solid alpha(#000000, 0.08);
+    border-radius: 8px;
+    color: #1b1c22;
+    min-height: 30px;
+    padding: 2px 6px;
+}
+.jot-tag-picker-search:focus-within {
+    border-color: alpha(#4a5cd1, 0.55);
+    background: #ffffff;
+}
+.jot-tag-picker-scroll {
+    background: transparent;
+}
+.jot-tag-picker-list {
+    background: transparent;
+}
+.jot-tag-picker-list row {
+    background: transparent;
+    border-radius: 6px;
+    margin: 1px 0;
+    transition: background 80ms ease;
+}
+.jot-tag-picker-list row:hover {
+    background: alpha(#000000, 0.05);
+}
+.jot-tag-picker-list row:selected {
+    background: alpha(#4a5cd1, 0.18);
+    color: #1b1c22;
+}
+.jot-tag-picker-list row:selected:hover {
+    background: alpha(#4a5cd1, 0.24);
+}
+.jot-tag-picker-row-icon,
+.jot-tag-picker-check {
+    color: alpha(#1b1c22, 0.55);
+    -gtk-icon-size: 14px;
+}
+.jot-tag-picker-row-clear {
+    color: alpha(#1b1c22, 0.55);
+    font-style: italic;
+}
+.jot-tag-picker-row-create {
+    color: #4a5cd1;
+}
+.jot-tag-picker-row-create .jot-tag-picker-row-icon {
+    color: #4a5cd1;
+}
+.jot-tag-picker-count {
+    color: alpha(#1b1c22, 0.5);
+    font-size: 11px;
+    font-feature-settings: "tnum";
+    padding: 0 4px;
+    background: alpha(#000000, 0.06);
+    border-radius: 8px;
+    min-width: 16px;
+}
+.jot-tag-picker-list row:selected .jot-tag-picker-count {
+    background: alpha(#000000, 0.10);
+}
 .jot-color-palette {
     margin-top: 2px;
 }
