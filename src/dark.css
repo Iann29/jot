@@ -54,7 +54,18 @@ window.jot-window > contents {
 .jot-sidebar {
     background: alpha(#0a0b0e, 0.45);
     border-right: 1px solid alpha(#ffffff, 0.05);
-    min-width: 220px;
+    min-width: 180px;
+}
+
+/* Draggable divider between the note list and the editor. */
+.jot-split > separator {
+    min-width: 5px;
+    background: alpha(#ffffff, 0.04);
+    transition: background 120ms ease;
+}
+
+.jot-split > separator:hover {
+    background: alpha(#6f9bff, 0.55);
 }
 
 .jot-sidebar-header {
@@ -75,41 +86,9 @@ window.jot-window > contents {
     background: alpha(#ffffff, 0.06);
 }
 
-.jot-tag-tabs-scroll {
-    background: transparent;
-}
-.jot-tag-tabs-scroll > scrollbar,
-.jot-tag-tabs-scroll undershoot,
-.jot-tag-tabs-scroll overshoot {
-    min-height: 0;
-    min-width: 0;
-    background: transparent;
-    border: 0;
-    opacity: 0;
-}
-.jot-tag-tabs-scroll > scrollbar.horizontal {
-    margin: 0;
-    padding: 0;
-}
-.jot-tag-tabs {
-    padding: 6px 8px 2px 8px;
-}
-.jot-tag-tab {
-    background: alpha(#ffffff, 0.04);
-    border: 1px solid alpha(#ffffff, 0.06);
-    border-radius: 8px;
-    color: alpha(#e6e6ea, 0.68);
-    padding: 4px 8px;
-    min-height: 26px;
-}
-.jot-tag-tab:hover {
-    background: alpha(#ffffff, 0.08);
-    color: #e6e6ea;
-}
-.jot-tag-tab-active {
-    background: alpha(#7c8cff, 0.20);
-    border-color: alpha(#7c8cff, 0.42);
-    color: #ffffff;
+/* Tag filter dropdown — sits above the search field in the sidebar. */
+.jot-tag-filter {
+    margin: 8px 8px 4px 8px;
 }
 
 .jot-list {
@@ -335,6 +314,11 @@ window.jot-window > contents {
 .jot-color-blue    { background: #7c8cff; }
 .jot-color-purple  { background: #c084fc; }
 .jot-color-pink    { background: #f472b6; }
+.jot-color-teal    { background: #2dd4bf; }
+.jot-color-cyan    { background: #38bdf8; }
+.jot-color-lime    { background: #a3e635; }
+.jot-color-brown   { background: #b08968; }
+.jot-color-gray    { background: #9ca3af; }
 
 /* Buttons */
 .jot-headerbar button {

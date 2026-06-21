@@ -355,10 +355,10 @@ fn find_fenced_code(chars: &[char]) -> Vec<(usize, usize)> {
     spans
 }
 
-/// Strip then re-apply all markdown tags. Markers also get
-/// `marker_hidden` so they vanish from rendering by default —
-/// `reveal_markers_at_cursor` brings them back on the cursor's line.
-pub fn refresh_markdown_tags(buffer: &TextBuffer, tags: &MdTags, excluded_tags: &[&TextTag]) {
+/// Remove every markdown tag from the buffer, leaving the raw source: all
+/// markers (`**`, `#`, …) visible and no styling. Backs the editor's
+/// "show source" toggle, and is the strip step of `refresh_markdown_tags`.
+pub fn clear_markdown_tags(buffer: &TextBuffer, tags: &MdTags) {
     let start = buffer.start_iter();
     let end = buffer.end_iter();
     for t in [
@@ -374,7 +374,16 @@ pub fn refresh_markdown_tags(buffer: &TextBuffer, tags: &MdTags, excluded_tags: 
     ] {
         buffer.remove_tag(t, &start, &end);
     }
+}
 
+/// Strip then re-apply all markdown tags. Markers also get
+/// `marker_hidden` so they vanish from rendering by default —
+/// `reveal_markers_at_cursor` brings them back on the cursor's line.
+pub fn refresh_markdown_tags(buffer: &TextBuffer, tags: &MdTags, excluded_tags: &[&TextTag]) {
+    clear_markdown_tags(buffer, tags);
+
+    let start = buffer.start_iter();
+    let end = buffer.end_iter();
     let text = buffer.text(&start, &end, true).to_string();
     let spans = scan(&text);
 
@@ -434,16 +443,28 @@ pub fn reveal_markers_at_cursor(
         if iter.has_tag(marker_hidden) {
             let run_start = iter;
             let mut run_end = iter;
-            while run_end.has_tag(marker_hidden) {
-                if run_end.offset() >= line_end.offset() {
+            // Advance to the end of the contiguous marker run. We step forward
+            // *before* re-checking the tag so the run always grows by at least
+            // one char — even when the marker reaches the line's end (e.g. a
+            // line ending in `**bold**`). The old version stopped with run_end
+            // still inside the marker, so `iter = run_end` never advanced and
+            // the outer loop spun forever at 100% CPU, freezing the app before
+            // its window could even map.
+            loop {
+                if !run_end.forward_char() || run_end.offset() > line_end.offset() {
                     break;
                 }
-                if !run_end.forward_char() {
+                if !run_end.has_tag(marker_hidden) {
                     break;
                 }
             }
-            buffer.apply_tag(marker_visible, &run_start, &run_end);
-            iter = run_end;
+            if run_end.offset() > run_start.offset() {
+                buffer.apply_tag(marker_visible, &run_start, &run_end);
+                iter = run_end;
+            } else if !iter.forward_char() {
+                // No progress possible (end of buffer) — bail out.
+                break;
+            }
         } else if !iter.forward_char() {
             break;
         }

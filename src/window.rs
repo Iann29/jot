@@ -12,7 +12,9 @@ use crate::config::{Config, Theme};
 use crate::db::{images_dir, Db};
 use crate::image_canvas::ImageCanvas;
 use crate::maintenance;
-use crate::markdown_tags::{refresh_markdown_tags, reveal_markers_at_cursor, MdTags};
+use crate::markdown_tags::{
+    clear_markdown_tags, refresh_markdown_tags, reveal_markers_at_cursor, MdTags,
+};
 use crate::note::Note;
 use crate::themes::ThemeController;
 use crate::transcribe::{TranscriptCmd, TranscriptEvent, TranscriptionHandle};
@@ -36,6 +38,11 @@ const NOTE_COLORS: &[(&str, &str)] = &[
     ("blue", "Blue"),
     ("purple", "Purple"),
     ("pink", "Pink"),
+    ("teal", "Teal"),
+    ("cyan", "Cyan"),
+    ("lime", "Lime"),
+    ("brown", "Brown"),
+    ("gray", "Gray"),
 ];
 
 pub struct JotWindow {
@@ -51,7 +58,10 @@ pub struct JotWindow {
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     placeholder: gtk::Label,
-    tag_tabs: gtk::Box,
+    filter_button: gtk::MenuButton,
+    filter_label: gtk::Label,
+    filter_list: gtk::ListBox,
+    filter_actions: RefCell<Vec<Option<String>>>,
     note_meta: gtk::Box,
     note_meta_toggle: gtk::Button,
     tag_picker_button: gtk::MenuButton,
@@ -70,6 +80,9 @@ pub struct JotWindow {
     autosave: RefCell<Option<glib::SourceId>>,
     pointer_pos: Cell<Option<(f64, f64)>>,
     ctrl_held: Cell<bool>,
+    /// When true the editor shows raw markdown source (markers visible, no
+    /// styling) instead of the rendered view. Toggled by the header eye.
+    raw_markdown: Cell<bool>,
     transcribe: RefCell<Option<TranscriptionHandle>>,
     /// State of the live voice session — pending chunks waiting for
     /// transcription, plus a TextMark anchored where text should land.
@@ -162,6 +175,13 @@ impl JotWindow {
             .tooltip_text("Comparar GIFs (antes / depois)")
             .build();
 
+        // Toggle between rendered markdown and the raw source (shows the
+        // **, #, `, - markers literally, with no styling).
+        let eye_btn = gtk::ToggleButton::builder()
+            .icon_name("view-reveal-symbolic")
+            .tooltip_text("Ver fonte markdown — mostra **, #, etc.")
+            .build();
+
         let delete_btn = gtk::Button::builder()
             .icon_name("user-trash-symbolic")
             .tooltip_text("Delete current note  ·  Ctrl+D")
@@ -190,6 +210,7 @@ impl JotWindow {
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
         header.pack_end(&export_btn);
+        header.pack_end(&eye_btn);
 
         // Sidebar
         let search_entry = gtk::SearchEntry::builder()
@@ -197,19 +218,63 @@ impl JotWindow {
             .build();
         search_entry.add_css_class("jot-search");
 
-        let tag_tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        tag_tabs.add_css_class("jot-tag-tabs");
-        let tag_scroller = gtk::ScrolledWindow::builder()
-            .child(&tag_tabs)
-            .hscrollbar_policy(gtk::PolicyType::Automatic)
-            .vscrollbar_policy(gtk::PolicyType::Never)
-            .min_content_height(38)
+        // Tag filter — a dropdown over the note list (replaces the old
+        // horizontal tab strip). The button shows the active filter; the
+        // popover lists "All" plus every tag in use, with note counts.
+        let filter_label = gtk::Label::builder()
+            .label("All")
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .hexpand(true)
             .build();
-        tag_scroller.add_css_class("jot-tag-tabs-scroll");
-        // The horizontal overlay scrollbar sits on top of the tag tabs and
-        // would intercept clicks even when hidden via CSS. Make it
-        // non-targetable so clicks pass through to the tabs beneath.
-        tag_scroller.hscrollbar().set_can_target(false);
+        filter_label.add_css_class("jot-tag-picker-label");
+
+        let filter_icon = gtk::Image::from_icon_name("tag-outline-symbolic");
+        filter_icon.add_css_class("jot-tag-picker-icon");
+        let filter_chevron = gtk::Image::from_icon_name("pan-down-symbolic");
+        filter_chevron.add_css_class("jot-tag-picker-chevron");
+
+        let filter_button_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        filter_button_content.append(&filter_icon);
+        filter_button_content.append(&filter_label);
+        filter_button_content.append(&filter_chevron);
+
+        let filter_button = gtk::MenuButton::builder()
+            .child(&filter_button_content)
+            .build();
+        filter_button.add_css_class("jot-tag-picker");
+        filter_button.add_css_class("jot-tag-filter");
+
+        let filter_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        filter_list.add_css_class("jot-tag-picker-list");
+
+        let filter_scroll = gtk::ScrolledWindow::builder()
+            .child(&filter_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .min_content_height(40)
+            .max_content_height(300)
+            .propagate_natural_height(true)
+            .build();
+        filter_scroll.add_css_class("jot-tag-picker-scroll");
+
+        let filter_popover_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        filter_popover_box.set_margin_start(6);
+        filter_popover_box.set_margin_end(6);
+        filter_popover_box.set_margin_top(6);
+        filter_popover_box.set_margin_bottom(6);
+        filter_popover_box.append(&filter_scroll);
+
+        let filter_popover = gtk::Popover::builder()
+            .child(&filter_popover_box)
+            .has_arrow(false)
+            .position(gtk::PositionType::Bottom)
+            .build();
+        filter_popover.add_css_class("jot-tag-picker-popover");
+        filter_popover.set_size_request(220, -1);
+        filter_button.set_popover(Some(&filter_popover));
 
         let list_box = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
@@ -224,10 +289,12 @@ impl JotWindow {
 
         let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
         sidebar.add_css_class("jot-sidebar");
-        sidebar.append(&tag_scroller);
+        sidebar.append(&filter_button);
         sidebar.append(&search_entry);
         sidebar.append(&scrolled_list);
-        sidebar.set_size_request(240, -1);
+        // Minimum the user can drag the divider down to; the starting width is
+        // set on the Paned below.
+        sidebar.set_size_request(180, -1);
 
         // Editor area
         let title_label = gtk::Label::builder()
@@ -426,11 +493,23 @@ impl JotWindow {
         editor_shell.append(&title_box);
         editor_shell.append(&editor_overlay);
         editor_shell.set_hexpand(true);
+        // Floor for the editor so the divider can't be dragged so far right
+        // that the editor becomes unusable.
+        editor_shell.set_size_request(360, -1);
 
-        // Split: sidebar + editor
-        let split = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        split.append(&sidebar);
-        split.append(&editor_shell);
+        // Split: sidebar + editor, separated by a draggable divider so the note
+        // list can be widened or narrowed. Window-resize space goes to the
+        // editor (resize_start_child = false); shrink is disabled on both sides
+        // so each pane keeps its minimum width.
+        let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+        split.set_start_child(Some(&sidebar));
+        split.set_end_child(Some(&editor_shell));
+        split.set_resize_start_child(false);
+        split.set_shrink_start_child(false);
+        split.set_shrink_end_child(false);
+        split.set_wide_handle(true);
+        split.set_position(240);
+        split.add_css_class("jot-split");
 
         // ToastOverlay sits between the split and the root so toasts hover
         // above the editor without affecting layout.
@@ -456,7 +535,10 @@ impl JotWindow {
             title_label,
             subtitle_label,
             placeholder,
-            tag_tabs: tag_tabs.clone(),
+            filter_button: filter_button.clone(),
+            filter_label: filter_label.clone(),
+            filter_list: filter_list.clone(),
+            filter_actions: RefCell::new(Vec::new()),
             note_meta: note_meta.clone(),
             note_meta_toggle: note_meta_toggle.clone(),
             tag_picker_button: tag_picker_button.clone(),
@@ -483,6 +565,7 @@ impl JotWindow {
             autosave: RefCell::new(None),
             pointer_pos: Cell::new(None),
             ctrl_held: Cell::new(false),
+            raw_markdown: Cell::new(false),
             transcribe: RefCell::new(None),
             voice_state: RefCell::new(None),
         });
@@ -501,6 +584,17 @@ impl JotWindow {
         record_btn.connect_clicked(move |_| win.launch_gif_recorder());
         let win = this.clone();
         compare_btn.connect_clicked(move |_| win.launch_compare_editor());
+        let win = this.clone();
+        eye_btn.connect_toggled(move |btn| {
+            let raw = btn.is_active();
+            win.raw_markdown.set(raw);
+            btn.set_icon_name(if raw {
+                "view-conceal-symbolic"
+            } else {
+                "view-reveal-symbolic"
+            });
+            win.apply_markdown();
+        });
         this.install_shortcuts();
         this.install_url_click();
         this.install_url_hover_cursor();
@@ -675,6 +769,18 @@ impl JotWindow {
             let action = win.tag_picker_actions.borrow().get(idx).cloned();
             if let Some(action) = action {
                 win.apply_tag_picker_action(action);
+            }
+        });
+
+        let win = self.clone();
+        self.filter_list.connect_row_activated(move |_, row| {
+            let idx = row.index() as usize;
+            let tag = win.filter_actions.borrow().get(idx).cloned();
+            if let Some(tag) = tag {
+                win.state.borrow_mut().active_tag = tag;
+                win.filter_button.popdown();
+                win.rebuild_tag_filter();
+                win.rebuild_list();
             }
         });
 
@@ -1199,68 +1305,97 @@ impl JotWindow {
     fn refresh_notes(self: &Rc<Self>) {
         let notes = self.db.list_notes().unwrap_or_default();
         self.state.borrow_mut().notes = notes;
-        self.rebuild_tag_tabs();
+        self.rebuild_tag_filter();
         self.rebuild_list();
     }
 
-    fn rebuild_tag_tabs(self: &Rc<Self>) {
-        while let Some(child) = self.tag_tabs.first_child() {
-            self.tag_tabs.remove(&child);
+    fn rebuild_tag_filter(self: &Rc<Self>) {
+        while let Some(child) = self.filter_list.first_child() {
+            self.filter_list.remove(&child);
         }
+        self.filter_actions.borrow_mut().clear();
 
-        let (tags, has_untagged, active_tag) = {
+        let (tags, active_tag) = {
             let mut state = self.state.borrow_mut();
-            let (tags, has_untagged) = collect_note_tags(&state.notes);
+            let tags = collect_note_tags_with_counts(&state.notes);
+            // Drop a stale active filter: either the tag is gone, or it's the
+            // empty "untagged" filter we no longer expose (untagged notes
+            // already live under "All").
             if let Some(active) = state.active_tag.as_deref() {
-                let active_exists = if active.is_empty() {
-                    has_untagged
-                } else {
-                    tags.iter().any(|t| t.eq_ignore_ascii_case(active))
-                };
+                let active_exists =
+                    !active.is_empty() && tags.iter().any(|(t, _)| t.eq_ignore_ascii_case(active));
                 if !active_exists {
                     state.active_tag = None;
                 }
             }
-            (tags, has_untagged, state.active_tag.clone())
+            (tags, state.active_tag.clone())
         };
 
-        let all = self.build_tag_tab("All", None, active_tag.is_none());
-        self.tag_tabs.append(&all);
+        // The button label reflects the active filter.
+        self.filter_label
+            .set_label(active_tag.as_deref().unwrap_or("All"));
 
-        if has_untagged {
-            let active = active_tag.as_deref() == Some("");
-            let untagged = self.build_tag_tab("Untagged", Some(String::new()), active);
-            self.tag_tabs.append(&untagged);
-        }
+        let total: usize = tags.iter().map(|(_, count)| *count).sum();
+        let all_row = self.build_filter_row("All", None, total, active_tag.is_none());
+        self.filter_list.append(&all_row);
+        self.filter_actions.borrow_mut().push(None);
 
-        for tag in tags {
+        for (tag, count) in tags {
             let active = active_tag
                 .as_deref()
                 .is_some_and(|current| current.eq_ignore_ascii_case(&tag));
-            let tab = self.build_tag_tab(&tag, Some(tag.clone()), active);
-            self.tag_tabs.append(&tab);
+            let row = self.build_filter_row(&tag, Some(tag.clone()), count, active);
+            self.filter_list.append(&row);
+            self.filter_actions.borrow_mut().push(Some(tag));
         }
     }
 
-    fn build_tag_tab(
+    fn build_filter_row(
         self: &Rc<Self>,
         label: &str,
-        tag_filter: Option<String>,
+        tag: Option<String>,
+        count: usize,
         active: bool,
-    ) -> gtk::Button {
-        let button = gtk::Button::builder().label(label).has_frame(false).build();
-        button.add_css_class("jot-tag-tab");
-        if active {
-            button.add_css_class("jot-tag-tab-active");
+    ) -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::new();
+        row.add_css_class("jot-tag-picker-row");
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        hbox.set_margin_start(8);
+        hbox.set_margin_end(8);
+        hbox.set_margin_top(4);
+        hbox.set_margin_bottom(4);
+
+        let icon_name = if tag.is_none() {
+            "view-list-symbolic"
+        } else {
+            "tag-outline-symbolic"
+        };
+        let icon = gtk::Image::from_icon_name(icon_name);
+        icon.add_css_class("jot-tag-picker-row-icon");
+        hbox.append(&icon);
+
+        let label_widget = gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        hbox.append(&label_widget);
+
+        if count > 0 {
+            let count_label = gtk::Label::new(Some(&count.to_string()));
+            count_label.add_css_class("jot-tag-picker-count");
+            hbox.append(&count_label);
         }
 
-        let win = self.clone();
-        button.connect_clicked(move |_| {
-            win.state.borrow_mut().active_tag = tag_filter.clone();
-            win.rebuild_tag_tabs();
-            win.rebuild_list();
-        });
-        button
+        if active {
+            let check = gtk::Image::from_icon_name("object-select-symbolic");
+            check.add_css_class("jot-tag-picker-check");
+            hbox.append(&check);
+        }
+
+        row.set_child(Some(&hbox));
+        row
     }
 
     fn rebuild_list(self: &Rc<Self>) {
@@ -1538,11 +1673,7 @@ impl JotWindow {
         self.rebuild_list();
         if !self.render_copy_blocks_if_needed(&body) {
             self.refresh_url_tags();
-            refresh_markdown_tags(
-                &self.buffer,
-                &self.md_tags,
-                &[&self.image_tag, &self.copy_tag],
-            );
+            self.apply_markdown();
         }
 
         // Snapshot for Ctrl+Z. Each saved version becomes a step on the
@@ -1786,11 +1917,22 @@ impl JotWindow {
             }
         }
         self.refresh_url_tags();
-        refresh_markdown_tags(
-            &self.buffer,
-            &self.md_tags,
-            &[&self.image_tag, &self.copy_tag],
-        );
+        self.apply_markdown();
+    }
+
+    /// Render or strip markdown in the editor depending on the raw-source
+    /// toggle: rendered (markers hidden, styled) by default, or the literal
+    /// source (markers shown, no styling) when the header eye is active.
+    fn apply_markdown(&self) {
+        if self.raw_markdown.get() {
+            clear_markdown_tags(&self.buffer, &self.md_tags);
+        } else {
+            refresh_markdown_tags(
+                &self.buffer,
+                &self.md_tags,
+                &[&self.image_tag, &self.copy_tag],
+            );
+        }
     }
 
     fn render_copy_blocks_if_needed(self: &Rc<Self>, body: &str) -> bool {
@@ -2859,28 +3001,6 @@ fn collect_note_tags_with_counts(notes: &[Note]) -> Vec<(String, usize)> {
     tags
 }
 
-fn collect_note_tags(notes: &[Note]) -> (Vec<String>, bool) {
-    let mut tags: Vec<String> = Vec::new();
-    let mut has_untagged = false;
-
-    for note in notes {
-        let tag = normalize_note_tag(&note.tag);
-        if tag.is_empty() {
-            has_untagged = true;
-            continue;
-        }
-        if !tags
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&tag))
-        {
-            tags.push(tag);
-        }
-    }
-
-    tags.sort_by_key(|tag| tag.to_lowercase());
-    (tags, has_untagged)
-}
-
 fn note_matches_tag_filter(note: &Note, active_tag: Option<&str>) -> bool {
     match active_tag {
         None => true,
@@ -3197,7 +3317,7 @@ impl JotWindow {
             note.tag = tag.clone();
         }
         self.update_tag_picker_label(&tag);
-        self.rebuild_tag_tabs();
+        self.rebuild_tag_filter();
         self.rebuild_list();
     }
 
@@ -3469,7 +3589,7 @@ impl JotWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_note_tags, copy_block_payload, copy_blocks_before_char_offset,
+        collect_note_tags_with_counts, copy_block_payload, copy_blocks_before_char_offset,
         normalize_note_color, normalize_note_tag, note_matches_tag_filter, parse_markdown_body,
         BodyPart,
     };
@@ -3535,9 +3655,13 @@ mod tests {
         assert_eq!(normalize_note_color("chartreuse"), "");
 
         let notes = vec![note("Work"), note("work"), note(""), note("Personal")];
-        let (tags, has_untagged) = collect_note_tags(&notes);
-        assert_eq!(tags, vec!["Personal".to_string(), "Work".to_string()]);
-        assert!(has_untagged);
+        let tags = collect_note_tags_with_counts(&notes);
+        // Counts merge case-insensitively (keeping first-seen casing); sorted
+        // by count desc, then name. Untagged notes are excluded.
+        assert_eq!(
+            tags,
+            vec![("Work".to_string(), 2), ("Personal".to_string(), 1)]
+        );
         assert!(note_matches_tag_filter(&notes[0], Some("work")));
         assert!(note_matches_tag_filter(&notes[2], Some("")));
         assert!(note_matches_tag_filter(&notes[3], None));
