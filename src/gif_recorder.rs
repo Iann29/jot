@@ -478,7 +478,7 @@ fn send_signal(child: &Child, sig: libc::c_int) {
 
 // ───────────────────────── helpers ──────────────────────────────────
 
-fn require_tool(name: &str) -> Result<()> {
+pub(crate) fn require_tool(name: &str) -> Result<()> {
     if which(name).is_some() {
         Ok(())
     } else {
@@ -486,7 +486,7 @@ fn require_tool(name: &str) -> Result<()> {
     }
 }
 
-fn which(name: &str) -> Option<PathBuf> {
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
@@ -516,7 +516,7 @@ pub fn ensure_gif_output_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn file_timestamp() -> String {
+pub(crate) fn file_timestamp() -> String {
     chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string()
 }
 
@@ -576,7 +576,7 @@ pub fn missing_tools_summary() -> Option<String> {
     }
 }
 
-fn quality_crf(q: crate::config::GifQuality) -> u32 {
+pub(crate) fn quality_crf(q: crate::config::GifQuality) -> u32 {
     use crate::config::GifQuality::*;
     match q {
         High => 17,
@@ -585,7 +585,7 @@ fn quality_crf(q: crate::config::GifQuality) -> u32 {
     }
 }
 
-fn quality_palette_stats(q: crate::config::GifQuality) -> &'static str {
+pub(crate) fn quality_palette_stats(q: crate::config::GifQuality) -> &'static str {
     use crate::config::GifQuality::*;
     match q {
         High => "full",
@@ -593,7 +593,7 @@ fn quality_palette_stats(q: crate::config::GifQuality) -> &'static str {
     }
 }
 
-fn quality_dither(q: crate::config::GifQuality) -> &'static str {
+pub(crate) fn quality_dither(q: crate::config::GifQuality) -> &'static str {
     use crate::config::GifQuality::*;
     match q {
         High | Balanced => "sierra2_4a",

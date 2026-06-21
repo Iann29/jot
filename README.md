@@ -36,8 +36,8 @@ Single binary. ~5 MB of RAM at rest. Instant startup. One keystroke up, one keys
 
 ```bash
 sudo pacman -S --needed gtk4 libadwaita sqlite alsa-lib
-curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/download/v1.4.2/jot-v1.4.2-x86_64-linux.tar.gz
-tar -xzf jot.tar.gz && cd jot-v1.4.2-x86_64-linux && ./install.sh
+curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/download/v1.5.0/jot-v1.5.0-x86_64-linux.tar.gz
+tar -xzf jot.tar.gz && cd jot-v1.5.0-x86_64-linux && ./install.sh
 ```
 
 Drops `jot` into `~/.local/bin`, the desktop entry into `~/.local/share/applications`, the icon into `~/.local/share/icons/hicolor/scalable/apps`. Make sure `~/.local/bin` is on your `PATH`.

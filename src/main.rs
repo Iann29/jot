@@ -1,4 +1,6 @@
 mod app;
+mod canvas;
+mod compare_editor;
 mod config;
 mod db;
 mod export;

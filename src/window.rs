@@ -157,6 +157,11 @@ impl JotWindow {
             .build();
         record_btn.add_css_class("jot-record-btn");
 
+        let compare_btn = gtk::Button::builder()
+            .icon_name("object-flip-horizontal-symbolic")
+            .tooltip_text("Comparar GIFs (antes / depois)")
+            .build();
+
         let delete_btn = gtk::Button::builder()
             .icon_name("user-trash-symbolic")
             .tooltip_text("Delete current note  ·  Ctrl+D")
@@ -180,6 +185,7 @@ impl JotWindow {
         header.pack_start(&new_btn);
         header.pack_start(&mic_btn);
         header.pack_start(&record_btn);
+        header.pack_start(&compare_btn);
         header.pack_end(&close_btn);
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
@@ -493,6 +499,8 @@ impl JotWindow {
         // the recorder hides it while slurp owns the screen.
         let win = this.clone();
         record_btn.connect_clicked(move |_| win.launch_gif_recorder());
+        let win = this.clone();
+        compare_btn.connect_clicked(move |_| win.launch_compare_editor());
         this.install_shortcuts();
         this.install_url_click();
         this.install_url_hover_cursor();
@@ -648,30 +656,27 @@ impl JotWindow {
 
         let win = self.clone();
         let key_ctrl = gtk::EventControllerKey::new();
-        key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            match key {
-                gdk::Key::Down => {
-                    win.move_tag_picker_selection(1);
-                    glib::Propagation::Stop
-                }
-                gdk::Key::Up => {
-                    win.move_tag_picker_selection(-1);
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
+        key_ctrl.connect_key_pressed(move |_, key, _, _| match key {
+            gdk::Key::Down => {
+                win.move_tag_picker_selection(1);
+                glib::Propagation::Stop
             }
+            gdk::Key::Up => {
+                win.move_tag_picker_selection(-1);
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
         });
         self.tag_picker_search.add_controller(key_ctrl);
 
         let win = self.clone();
-        self.tag_picker_list
-            .connect_row_activated(move |_, row| {
-                let idx = row.index() as usize;
-                let action = win.tag_picker_actions.borrow().get(idx).cloned();
-                if let Some(action) = action {
-                    win.apply_tag_picker_action(action);
-                }
-            });
+        self.tag_picker_list.connect_row_activated(move |_, row| {
+            let idx = row.index() as usize;
+            let action = win.tag_picker_actions.borrow().get(idx).cloned();
+            if let Some(action) = action {
+                win.apply_tag_picker_action(action);
+            }
+        });
 
         let color_buttons = self.color_buttons.borrow().clone();
         for (color, button) in color_buttons {
@@ -2519,6 +2524,55 @@ impl JotWindow {
         crate::recorder_window::launch_recorder(&app, Some(self.window.clone()));
     }
 
+    /// Pick the "before" then the "after" GIF/video, then open the
+    /// comparison editor. Two sequential pickers keep the order unambiguous.
+    fn launch_compare_editor(self: &Rc<Self>) {
+        let Some(app) = self.window.application() else {
+            return;
+        };
+        let Ok(app) = app.downcast::<adw::Application>() else {
+            return;
+        };
+        let win = self.window.clone();
+
+        // Default both pickers to ~/Videos/gif if it exists.
+        let gif_dir = crate::gif_recorder::ensure_gif_output_dir().ok();
+
+        let before_dialog = gtk::FileDialog::builder()
+            .title("Comparação — escolher ANTES (imagem ou GIF)")
+            .build();
+        if let Some(d) = gif_dir.as_ref() {
+            before_dialog.set_initial_folder(Some(&gtk::gio::File::for_path(d)));
+        }
+
+        let app_outer = app.clone();
+        let win_outer = win.clone();
+        let gif_dir_inner = gif_dir.clone();
+        before_dialog.open(Some(&win), gtk::gio::Cancellable::NONE, move |res| {
+            let Ok(file) = res else { return };
+            let Some(before) = file.path() else { return };
+
+            let after_dialog = gtk::FileDialog::builder()
+                .title("Comparação — escolher DEPOIS (imagem ou GIF)")
+                .build();
+            if let Some(d) = gif_dir_inner.as_ref() {
+                after_dialog.set_initial_folder(Some(&gtk::gio::File::for_path(d)));
+            }
+            let app_inner = app_outer.clone();
+            let win_inner = win_outer.clone();
+            after_dialog.open(Some(&win_outer), gtk::gio::Cancellable::NONE, move |res2| {
+                let Ok(file2) = res2 else { return };
+                let Some(after) = file2.path() else { return };
+                crate::compare_editor::launch_compare_editor(
+                    &app_inner,
+                    Some(win_inner.clone()),
+                    before.clone(),
+                    after,
+                );
+            });
+        });
+    }
+
     fn export_current_note(self: &Rc<Self>) {
         let Some(id) = self.state.borrow().current_id else {
             self.toast_overlay.add_toast(
@@ -2792,10 +2846,7 @@ fn collect_note_tags_with_counts(notes: &[Note]) -> Vec<(String, usize)> {
         if tag.is_empty() {
             continue;
         }
-        if let Some(existing) = tags
-            .iter_mut()
-            .find(|(t, _)| t.eq_ignore_ascii_case(&tag))
-        {
+        if let Some(existing) = tags.iter_mut().find(|(t, _)| t.eq_ignore_ascii_case(&tag)) {
             existing.1 += 1;
         } else {
             tags.push((tag, 1));
@@ -3153,10 +3204,12 @@ impl JotWindow {
     fn update_tag_picker_label(&self, tag: &str) {
         if tag.is_empty() {
             self.tag_picker_label.set_text("Add tag…");
-            self.tag_picker_label.add_css_class("jot-tag-picker-label-empty");
+            self.tag_picker_label
+                .add_css_class("jot-tag-picker-label-empty");
         } else {
             self.tag_picker_label.set_text(tag);
-            self.tag_picker_label.remove_css_class("jot-tag-picker-label-empty");
+            self.tag_picker_label
+                .remove_css_class("jot-tag-picker-label-empty");
         }
     }
 
