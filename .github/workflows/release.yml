@@ -104,3 +104,276 @@ jobs:
             dist/jot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ══════════════════════════════════════════════════════════════════════
+  #  Windows (MSYS2 / UCRT64)
+  #
+  #  Builds jot.exe against the MSYS2 UCRT64 GTK4 stack and packages a
+  #  fully relocatable bundle via scripts/bundle-windows.sh. Runs on every
+  #  trigger (push to main, PRs, tags) — the repo is public, so runner
+  #  minutes are free and a Windows regression should surface on the PR
+  #  rather than at tag time.
+  # ══════════════════════════════════════════════════════════════════════
+  windows:
+    name: Build (windows-latest, x86_64, MSYS2/UCRT64)
+    runs-on: windows-latest
+    # Serialises against the linux job's softprops step. Two jobs calling
+    # action-gh-release@v2 concurrently on the same tag race to CREATE the
+    # release and one of them 422s. `needs` makes linux create it and this
+    # job append to it. (Alternative: both upload-artifact, a third job
+    # publishes. Pick one — never two independent create paths.)
+    needs: build
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      # MSYS2's cargo.exe is a NATIVE Windows binary: it does NOT understand
+      # /d/a/jot/jot. MSYS2 bash does not translate POSIX paths in env vars
+      # for native exes either. So these MUST be Windows paths — and bash
+      # must never cp/rm them directly (use `cygpath -u` first).
+      CARGO_HOME: ${{ github.workspace }}\.cargo-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}\target
+      # Inherited from the workflow-level env; restated here so it is obvious
+      # that the Windows build is held to the same bar as the Linux one. The
+      # cfg-gated unix-only code must be gated warning-clean in BOTH cfg
+      # worlds — an import left dead under cfg(windows) fails this job.
+      RUSTFLAGS: -D warnings
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # ── MSYS2 / UCRT64 ────────────────────────────────────────────────
+      #
+      # Toolchain choice: MSYS2's own `mingw-w64-ucrt-x86_64-rust`, NOT
+      # rustup's x86_64-pc-windows-gnu.
+      #
+      #   * rustup's x86_64-pc-windows-gnu ships a self-contained mingw-w64
+      #     that links **msvcrt.dll**.
+      #   * MSYS2's UCRT64 environment links **ucrtbase.dll**.
+      #   * Same target triple name, different C runtime. Mixing them means
+      #     two heaps, two FILE* tables, two errno, two locale states across
+      #     the Rust<->GTK boundary. It links, it mostly runs, and it
+      #     corrupts on the paths that cross the CRT (file handles from
+      #     GIO/GdkPixbuf, setlocale, freeing memory allocated on the other
+      #     side).
+      #   * mingw-w64-ucrt-x86_64-rust is built against the exact same UCRT
+      #     sysroot as the gtk4/libadwaita packages it will link. It also
+      #     brings cargo, clippy-driver and rustfmt.
+      #
+      # If you truly need rustup (e.g. a pinned toolchain / rust-toolchain.toml),
+      # the ONLY safe pairing is `msystem: MINGW64` (msvcrt) + rustup's
+      # stable-x86_64-pc-windows-gnu. UCRT64 + rustup-gnu is the trap.
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          release: true
+          cache: true          # caches the pacman package downloads
+          # 'minimal' (the default) keeps the Windows PATH out: no MSVC
+          # link.exe, no Strawberry Perl, no runner-preinstalled rustup
+          # (which is MSVC-ABI) shadowing MSYS2's cargo. Never use 'inherit'.
+          path-type: minimal
+          install: >-
+            zip
+            mingw-w64-ucrt-x86_64-rust
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-librsvg
+            mingw-w64-ucrt-x86_64-gdk-pixbuf2
+            mingw-w64-ucrt-x86_64-adwaita-icon-theme
+            mingw-w64-ucrt-x86_64-hicolor-icon-theme
+            mingw-w64-ucrt-x86_64-gsettings-desktop-schemas
+            mingw-w64-ucrt-x86_64-glib2
+      # NOTE: `zip` is unprefixed — it lives in the MSYS repo, not mingw.
+      # Omitting it is the #1 "works locally, dies in CI" packaging failure.
+      # NOTE: binutils is not redundant — build.rs drives `windres` through
+      # the winresource crate to embed data/icons/jot.ico and the app
+      # manifest, and rusqlite's `bundled` feature needs gcc for the SQLite
+      # amalgamation.
+      # NOTE: no ALSA/PortAudio equivalent is needed — cpal 0.16 on Windows
+      # uses WASAPI through the `windows-sys` crate, which ships its own
+      # prebuilt import libs (x86_64_gnu flavour included). Zero system deps.
+      # NOTE: no PKG_CONFIG_PATH is needed — pkgconf from UCRT64 already
+      # searches /ucrt64/lib/pkgconfig and /ucrt64/share/pkgconfig. And with
+      # path-type: minimal there is no stray Windows PKG_CONFIG_PATH to leak
+      # in. gtk4-sys / libadwaita-sys build scripts find everything.
+
+      - name: Toolchain + GTK stack versions (also the cache fingerprint)
+        run: |
+          set -euo pipefail
+          {
+            rustc -vV
+            cargo -V
+            pkgconf --modversion gtk4 libadwaita-1 glib-2.0 gdk-pixbuf-2.0
+            pacman -Q mingw-w64-ucrt-x86_64-rust \
+                      mingw-w64-ucrt-x86_64-gtk4 \
+                      mingw-w64-ucrt-x86_64-libadwaita \
+                      mingw-w64-ucrt-x86_64-glib2 \
+                      mingw-w64-ucrt-x86_64-gdk-pixbuf2 \
+                      mingw-w64-ucrt-x86_64-librsvg \
+                      mingw-w64-ucrt-x86_64-adwaita-icon-theme
+          } | tee .ci-win-fingerprint
+          # Hard gate: the adw crate is built with features = ["v1_5"], so a
+          # libadwaita older than 1.5 compiles into undefined symbols.
+          # (MSYS2 UCRT64 currently ships 1.9.x — this is belt-and-braces
+          # against a repo rollback.)
+          pkgconf --atleast-version=1.5 libadwaita-1 \
+            || { echo "::error::libadwaita $(pkgconf --modversion libadwaita-1) < 1.5 required by adw features=[v1_5]"; exit 1; }
+          pkgconf --atleast-version=4.14 gtk4 \
+            || { echo "::error::gtk4 $(pkgconf --modversion gtk4) < 4.14 required by gtk4 features=[v4_14]"; exit 1; }
+
+      # Swatinem/rust-cache is deliberately NOT used: it shells out to
+      # `cargo metadata` from node, and MSYS2's cargo.exe is not on the
+      # Windows PATH that node inherits. Plain actions/cache instead.
+      - name: Cache cargo registry + target/
+        uses: actions/cache@v4
+        with:
+          # registry\index is deliberately excluded — huge, slow to restore,
+          # and cargo rebuilds it from the sparse protocol quickly. The
+          # .crate files in registry\cache are what actually save time.
+          path: |
+            ${{ github.workspace }}\.cargo-home\registry\cache
+            ${{ github.workspace }}\.cargo-home\git\db
+            ${{ github.workspace }}\target
+          # The fingerprint file pulls the MSYS2 package versions into the
+          # key, so a rolling gtk4/rust bump invalidates target/ instead of
+          # silently relinking against mismatched headers.
+          key: jot-win-ucrt64-${{ hashFiles('Cargo.lock', '.ci-win-fingerprint') }}
+          restore-keys: |
+            jot-win-ucrt64-
+
+      # fmt runs in the linux job and is platform-independent. Linux clippy,
+      # however, only ever sees the cfg(unix) world — the cfg(windows) tree
+      # needs its own compile gate here. `cargo build` below covers the
+      # cfg(windows) PRODUCTION code under -D warnings; this check adds the
+      # cfg(test) tree (the OS-sensitive tests: image_key case folding, zip
+      # entry names, CRLF markdown), which `--release` never compiles. It is
+      # metadata-cheap next to the fat-LTO build and fails in seconds, not
+      # after 30 minutes.
+      - name: cargo check --all-targets --locked
+        run: cargo check --all-targets --locked
+
+      - name: cargo build --release --locked
+        run: |
+          set -euo pipefail
+          # --locked works exactly as on linux (Cargo.lock is committed and
+          # already contains the windows-only crates). It does NOT pin the
+          # MSYS2 side: a pacman -Syu in this job can still move gtk4 under
+          # you. That is the real reproducibility hole, not cargo.
+          cargo build --release --locked
+          ls -l "$(cygpath -u "$CARGO_TARGET_DIR")/release/jot.exe"
+
+      - name: Bundle the relocatable GTK4 runtime
+        id: bundle
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="v$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          chmod +x scripts/bundle-windows.sh
+          ./scripts/bundle-windows.sh "$VERSION"
+          PKG="jot-${VERSION}-x86_64-windows"
+          # cygpath: $GITHUB_ENV / $GITHUB_OUTPUT are Windows paths.
+          {
+            echo "PKG=${PKG}"
+            echo "VERSION=${VERSION}"
+          } >> "$(cygpath -u "$GITHUB_ENV")"
+          {
+            echo "pkg=${PKG}"
+            echo "version=${VERSION}"
+          } >> "$(cygpath -u "$GITHUB_OUTPUT")"
+
+      # ── The gate that actually matters ────────────────────────────────
+      # Every bundling failure mode (missing lazily-loaded DLL, uncompiled
+      # gschemas, broken loaders.cache) is a RUNTIME failure. Without this
+      # step the whole recipe is unverified. Run it from pwsh with a
+      # scrubbed PATH so the bundle cannot silently fall back to
+      # C:\msys64\ucrt64\bin.
+      - name: Smoke-test the zip with a scrubbed PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Nothing but System32. If jot.exe survives this, the bundle is
+          # genuinely self-contained.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          $pkg   = $env:PKG
+          $root  = Join-Path $env:GITHUB_WORKSPACE 'dist\smoke'
+          $panic = Join-Path $env:LOCALAPPDATA 'jot-panic.log'
+          Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          # A stale log from an earlier attempt would poison the check below.
+          Remove-Item -Force $panic -ErrorAction SilentlyContinue
+          Expand-Archive -Path (Join-Path $env:GITHUB_WORKSPACE "dist\$pkg.zip") -DestinationPath $root
+          $dir = Join-Path $root $pkg
+          $exe = Join-Path $dir 'jot.exe'
+          if (-not (Test-Path $exe)) { throw "jot.exe missing from the zip" }
+
+          # The runner has no GPU and no Vulkan ICD; force the software path
+          # so we are testing DLL/schema/icon wiring, not the renderer.
+          $env:GSK_RENDERER     = 'cairo'
+          $env:G_MESSAGES_DEBUG = 'all'
+          $env:GTK_A11Y         = 'none'
+
+          $p = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) {
+            Write-Host "::error::jot.exe exited (code $($p.ExitCode)) — the bundle is incomplete."
+            Write-Host "--- $panic ---"
+            Get-Content $panic -ErrorAction SilentlyContinue
+            # 0xC0000135 / -1073741515 = STATUS_DLL_NOT_FOUND -> missing DLL.
+            # Abort (3 / 0xC0000409) with no panic log -> almost always a
+            # missing GSettings schema (g_error) or loaders.cache.
+            exit 1
+          }
+          # "Still running" is NOT sufficient on its own: the Windows panic
+          # hook pops a MessageBox before aborting, and that modal blocks the
+          # panicking thread forever on a runner with nobody to click OK. The
+          # panic log is the only honest tell that the process is wedged
+          # rather than healthy.
+          if (Test-Path $panic) {
+            Write-Host "::error::jot.exe panicked during the smoke test."
+            Get-Content $panic
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Write-Host "bundle smoke test OK — jot.exe stayed alive for 20s with PATH=System32 only"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.bundle.outputs.pkg }}
+          path: |
+            dist/${{ steps.bundle.outputs.pkg }}.zip
+            dist/${{ steps.bundle.outputs.pkg }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      # ─── Release-only ─────────────────────────────────────────────────
+      # The linux job (needs:) has already created the release for this tag,
+      # so this call only appends assets. Verified safe: action-gh-release
+      # documents that "when the release info keys (such as name, body,
+      # prerelease, etc.) are not explicitly set and there is already an
+      # existing release for the tag, the release will retain its original
+      # info" — so omitting name/body here does NOT wipe the tag-annotation
+      # notes the linux job set.
+      - name: Publish Windows assets to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            dist/${{ steps.bundle.outputs.pkg }}.zip
+            dist/${{ steps.bundle.outputs.pkg }}.zip.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

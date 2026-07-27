@@ -5,22 +5,41 @@ use chrono::Local;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
-use crate::db::{backups_dir, db_path, images_dir, Db};
+use crate::db::{backups_dir, db_path, image_key, images_dir, Db};
 
 const BACKUP_RETENTION: usize = 7;
 const BACKUP_PREFIX: &str = "notes-";
 const BACKUP_EXT: &str = "db";
 
-/// Sweep `~/.local/share/jot/images/` and remove any file that no note body
-/// references. Cheap to run — just stats every entry once and string-matches
-/// against the in-memory ref set.
+/// Sweep the data directory's `images/` folder and remove any file that no
+/// note body references. Cheap to run — just stats every entry once and
+/// string-matches against the in-memory ref set.
+///
+/// Both sides are compared through [`image_key`] (bare file name, case-folded
+/// on Windows) rather than as full paths: bodies carry an absolute path from
+/// whichever machine pasted the image, and a path mismatch here means mass
+/// deletion, not "these are orphans". This runs at every startup, silently.
 pub fn vacuum_orphan_images(db: &Db) -> Result<usize> {
     let images = images_dir()?;
     if !images.exists() {
         return Ok(0);
     }
 
-    let referenced = db.referenced_image_paths()?;
+    let referenced = db.referenced_image_names()?;
+    // Defence in depth against a future parsing regression: an empty
+    // reference set while bodies still CONTAIN the image marker means the
+    // parser (or the keying) broke — not that every image went unreferenced.
+    // Refuse to empty the folder on that evidence. Keyed on the marker, not
+    // on "notes exist": a steady state of notes with no images is ordinary
+    // and the vacuum must keep reclaiming orphans there. The is_empty()
+    // short-circuit keeps the extra body scan off the common path.
+    if referenced.is_empty() && db.any_body_has_image_marker()? {
+        tracing::warn!(
+            "orphan-image vacuum skipped: note bodies carry image references but none could be parsed"
+        );
+        return Ok(0);
+    }
+
     let mut removed = 0;
     for entry in std::fs::read_dir(&images).context("read images dir")? {
         let entry = match entry {
@@ -34,7 +53,16 @@ pub fn vacuum_orphan_images(db: &Db) -> Result<usize> {
         if !path.is_file() {
             continue;
         }
-        if referenced.contains(&path) {
+        // A name we cannot key (non-UTF-8) is one we could never have written,
+        // but we also cannot prove it is an orphan. Leave it alone.
+        let Some(key) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(image_key)
+        else {
+            continue;
+        };
+        if referenced.contains(&key) {
             continue;
         }
         match std::fs::remove_file(&path) {
@@ -51,8 +79,8 @@ pub fn vacuum_orphan_images(db: &Db) -> Result<usize> {
     Ok(removed)
 }
 
-/// Snapshot the SQLite DB into `~/.local/share/jot/backups/notes-YYYY-MM-DD.db`
-/// once per calendar day. Older backups beyond `BACKUP_RETENTION` are deleted.
+/// Snapshot the SQLite DB into `<data dir>/backups/notes-YYYY-MM-DD.db` once
+/// per calendar day. Older backups beyond `BACKUP_RETENTION` are deleted.
 /// Uses the SQLite Online Backup API so it stays consistent even with WAL.
 pub fn ensure_daily_backup() -> Result<Option<PathBuf>> {
     let src = db_path()?;

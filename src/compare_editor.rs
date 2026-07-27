@@ -35,6 +35,16 @@ const PREVIEW_MAX_H: i32 = 480;
 const PREVIEW_FPS_MAX: f64 = 12.0;
 const PREVIEW_MAX_FRAMES: i32 = 150; // ~150 × 480p frames ≈ a couple hundred MB
 
+/// Shown in the status bar when ffmpeg isn't on PATH. It is a hard
+/// prerequisite of this window (we don't vendor it — licensing and size),
+/// so the hint has to name the install route the user actually has.
+#[cfg(unix)]
+const FFMPEG_MISSING_HINT: &str =
+    "ffmpeg is not installed — install it (e.g. sudo pacman -S ffmpeg) to preview and export.";
+#[cfg(windows)]
+const FFMPEG_MISSING_HINT: &str =
+    "ffmpeg not found on PATH — install it (winget install Gyan.FFmpeg) and reopen this window.";
+
 // ───────────────────────────── ClipPreview ───────────────────────────
 
 mod preview_imp {
@@ -398,34 +408,54 @@ fn spawn_decode(path: PathBuf, which: usize, tx: async_channel::Sender<PreviewMs
                 let dir = base.join(format!("p{seq}"));
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-                let pattern = dir.join("f_%05d.png");
-                let status = std::process::Command::new("ffmpeg")
-                    .args(["-y", "-loglevel", "error", "-i"])
-                    .arg(&path)
-                    .args([
-                        "-vf",
-                        &format!("fps={fps:.4},scale=-2:{PREVIEW_MAX_H}"),
-                        "-frames:v",
-                        &PREVIEW_MAX_FRAMES.to_string(),
-                    ])
-                    .arg(&pattern)
-                    .stdin(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map_err(|e| e.to_string())?;
-                if !status.success() {
-                    return Err("ffmpeg frame extraction failed".into());
-                }
+                // Everything from here on runs in an inner closure so that no
+                // failure can leak `dir`: on success the main thread deletes
+                // it once the textures are loaded, but on the error paths
+                // nobody else ever learns the directory exists, and the cache
+                // would slowly fill with p0, p1, p2… (Windows hits these paths
+                // far more often — a missing ffmpeg fails here every time.)
+                let extract = (|| -> Result<Vec<PathBuf>, String> {
+                    let pattern = dir.join("f_%05d.png");
+                    let status = canvas::ff_command("ffmpeg")
+                        .args(["-y", "-loglevel", "error", "-i"])
+                        .arg(&path)
+                        .args([
+                            "-vf",
+                            &format!("fps={fps:.4},scale=-2:{PREVIEW_MAX_H}"),
+                            "-frames:v",
+                            &PREVIEW_MAX_FRAMES.to_string(),
+                        ])
+                        .arg(&pattern)
+                        .stdin(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map_err(|e| e.to_string())?;
+                    if !status.success() {
+                        return Err("ffmpeg frame extraction failed".into());
+                    }
 
-                let mut frames: Vec<PathBuf> = std::fs::read_dir(&dir)
-                    .map_err(|e| e.to_string())?
-                    .filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
-                    .collect();
-                frames.sort();
-                if frames.is_empty() {
-                    return Err("no frames extracted".into());
-                }
+                    let mut frames: Vec<PathBuf> = std::fs::read_dir(&dir)
+                        .map_err(|e| e.to_string())?
+                        .filter_map(|e| e.ok().map(|e| e.path()))
+                        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
+                        .collect();
+                    frames.sort();
+                    if frames.is_empty() {
+                        return Err("no frames extracted".into());
+                    }
+                    Ok(frames)
+                })();
+
+                let frames = match extract {
+                    Ok(frames) => frames,
+                    Err(e) => {
+                        if let Err(rm) = std::fs::remove_dir_all(&dir) {
+                            tracing::warn!("preview: could not remove {}: {rm}", dir.display());
+                        }
+                        return Err(e);
+                    }
+                };
+
                 Ok(PreviewMsg::Loaded {
                     which,
                     duration,
@@ -499,6 +529,12 @@ impl CompareEditor {
         header.pack_start(&play_btn);
 
         let copy_btn = gtk::Button::from_icon_name("edit-copy-symbolic");
+        // On Windows the clipboard only receives a still frame (gdk-win32 has
+        // no image/gif flavour to offer), so the button must not promise the
+        // animation. See the matching status text in `on_export`.
+        #[cfg(windows)]
+        copy_btn.set_tooltip_text(Some("Copy first frame (still image)"));
+        #[cfg(unix)]
         copy_btn.set_tooltip_text(Some("Copiar GIF"));
         let export_btn = gtk::Button::with_label("Exportar GIF");
         export_btn.add_css_class("suggested-action");
@@ -551,7 +587,14 @@ impl CompareEditor {
         controls.append(&labeled("Qualidade:", &quality_dd));
         controls.append(&labels_check);
 
-        let status = gtk::Label::new(Some("Arraste as alças pra cortar cada clipe."));
+        // ffmpeg drives both the previews and the export, so without it the
+        // window is inert. Say it once, up front, instead of letting the user
+        // discover it through two failed previews and a failed export.
+        let status = gtk::Label::new(Some(if crate::gif_recorder::which("ffmpeg").is_some() {
+            "Arraste as alças pra cortar cada clipe."
+        } else {
+            FFMPEG_MISSING_HINT
+        }));
         status.add_css_class("dim-label");
         status.set_xalign(0.0);
         status.set_hexpand(true);
@@ -640,7 +683,13 @@ impl CompareEditor {
                             })
                             .collect();
                         if let Some(dir) = dir {
-                            let _ = std::fs::remove_dir_all(&dir);
+                            // Windows refuses to delete files whose handles are
+                            // still open (a half-loaded texture, an AV scanner),
+                            // so this can genuinely fail — log it instead of
+                            // leaking the cache silently.
+                            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                                tracing::warn!("preview: could not remove {}: {e}", dir.display());
+                            }
                         }
                         if !textures.is_empty() {
                             me.previews[which].set_frames(textures, duration, fps);
@@ -817,7 +866,15 @@ impl CompareEditor {
                         if to_clipboard {
                             match copy_gif_to_clipboard(&path) {
                                 Ok(()) => {
-                                    me.status.set_text("✓ Copiado para a área de transferência")
+                                    // Windows only gets a still frame onto the
+                                    // clipboard, so don't let the user paste it
+                                    // somewhere and wonder why it doesn't move.
+                                    #[cfg(windows)]
+                                    me.status.set_text(
+                                        "✓ Copied still frame — use Export for the animated GIF",
+                                    );
+                                    #[cfg(unix)]
+                                    me.status.set_text("✓ Copiado para a área de transferência");
                                 }
                                 Err(e) => me
                                     .status
@@ -827,14 +884,21 @@ impl CompareEditor {
                             let kb = std::fs::metadata(&path)
                                 .map(|m| m.len() / 1024)
                                 .unwrap_or(0);
-                            me.status.set_text(&format!(
+                            let mut text = format!(
                                 "✓ {} · {} KB",
                                 path.file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_default(),
                                 kb
-                            ));
-                            let _ = open_path(&path);
+                            );
+                            // The GIF is on disk either way — only the "reveal
+                            // it" convenience can fail, so say so rather than
+                            // leaving a click that appears to do nothing.
+                            if let Err(e) = open_path(&path) {
+                                tracing::warn!("could not open {}: {e:#}", path.display());
+                                text.push_str(" — could not open it automatically");
+                            }
+                            me.status.set_text(&text);
                         }
                     }
                     Err(msg) => {
@@ -847,10 +911,21 @@ impl CompareEditor {
     }
 
     fn on_close(&self) {
-        if let Some(main) = self.main_window_ref.upgrade() {
-            main.present();
-        } else if let Some(app) = self.window.application() {
-            app.quit();
+        // A destroyed main window (Windows close path) still upgrades — the
+        // Rc↔GObject cycle keeps the WeakRef alive — but it has been released
+        // by its application. Presenting a destroyed toplevel is a GTK error,
+        // so treat it as gone and quit instead.
+        match self
+            .main_window_ref
+            .upgrade()
+            .filter(|w| w.application().is_some())
+        {
+            Some(main) => main.present(),
+            None => {
+                if let Some(app) = self.window.application() {
+                    app.quit();
+                }
+            }
         }
     }
 }

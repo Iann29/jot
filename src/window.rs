@@ -87,6 +87,12 @@ pub struct JotWindow {
     /// State of the live voice session — pending chunks waiting for
     /// transcription, plus a TextMark anchored where text should land.
     voice_state: RefCell<Option<VoiceSession>>,
+    /// Monotonic id of the CURRENT voice session. Every event loop captures
+    /// the generation it was started under, and handle_voice_event drops
+    /// events from any other — a session torn down by a stream error (the
+    /// Windows WASAPI path) keeps its worker threads alive for a while, and
+    /// their late Chunk/Finished events must not touch a newer session.
+    voice_generation: Cell<u64>,
 }
 
 /// Tracks a single live voice-input session.
@@ -143,9 +149,17 @@ impl JotWindow {
             .build();
         window.add_css_class("jot-window");
 
-        // Header
+        // Header. On Linux/Hyprland the compositor owns close/minimise
+        // (keybinds), so the title buttons stay off and the header keeps its
+        // clean look. Windows has no such keybinds — without the native
+        // controls there would be no way to minimise at all — so they are
+        // shown there.
+        #[cfg(unix)]
+        let show_window_controls = false;
+        #[cfg(windows)]
+        let show_window_controls = true;
         let header = adw::HeaderBar::builder()
-            .show_end_title_buttons(false)
+            .show_end_title_buttons(show_window_controls)
             .show_start_title_buttons(false)
             .build();
         header.add_css_class("jot-headerbar");
@@ -164,11 +178,19 @@ impl JotWindow {
             .build();
         mic_btn.add_css_class("jot-mic-btn");
 
-        let record_btn = gtk::Button::builder()
-            .icon_name("media-record-symbolic")
-            .tooltip_text("Record screen GIF  ·  Super+R")
-            .build();
-        record_btn.add_css_class("jot-record-btn");
+        // Screen-region recorder — Linux only (slurp + wf-recorder are
+        // wlroots tools, and the placement picker talks to hyprctl). On
+        // Windows the button is absent rather than dead; GIF *export* still
+        // ships via the compare editor next to it.
+        #[cfg(unix)]
+        let record_btn = {
+            let btn = gtk::Button::builder()
+                .icon_name("media-record-symbolic")
+                .tooltip_text("Record screen GIF  ·  Super+R")
+                .build();
+            btn.add_css_class("jot-record-btn");
+            btn
+        };
 
         let compare_btn = gtk::Button::builder()
             .icon_name("object-flip-horizontal-symbolic")
@@ -197,15 +219,27 @@ impl JotWindow {
             .tooltip_text("Settings")
             .build();
 
+        // Closing means "hide" on Linux and "quit" on Windows — see
+        // connect_close_request below for why.
+        #[cfg(unix)]
+        let close_tooltip = "Hide window  ·  Esc";
+        #[cfg(windows)]
+        let close_tooltip = "Close jot  ·  Alt+F4";
         let close_btn = gtk::Button::builder()
             .icon_name("window-close-symbolic")
-            .tooltip_text("Hide window  ·  Esc")
+            .tooltip_text(close_tooltip)
             .build();
 
         header.pack_start(&new_btn);
         header.pack_start(&mic_btn);
+        #[cfg(unix)]
         header.pack_start(&record_btn);
         header.pack_start(&compare_btn);
+        // On Windows the native title buttons already provide an X (and
+        // minimise); packing our styled close button too would show two X's
+        // side by side. The button still exists and stays wired so the
+        // close paths are identical on both platforms — it just isn't shown.
+        #[cfg(unix)]
         header.pack_end(&close_btn);
         header.pack_end(&settings_btn);
         header.pack_end(&delete_btn);
@@ -568,6 +602,7 @@ impl JotWindow {
             raw_markdown: Cell::new(false),
             transcribe: RefCell::new(None),
             voice_state: RefCell::new(None),
+            voice_generation: Cell::new(0),
         });
 
         // Wire callbacks
@@ -580,8 +615,11 @@ impl JotWindow {
         // GIF recorder — share the running adw::Application via the
         // window's application() handle, hand the main window over so
         // the recorder hides it while slurp owns the screen.
-        let win = this.clone();
-        record_btn.connect_clicked(move |_| win.launch_gif_recorder());
+        #[cfg(unix)]
+        {
+            let win = this.clone();
+            record_btn.connect_clicked(move |_| win.launch_gif_recorder());
+        }
         let win = this.clone();
         compare_btn.connect_clicked(move |_| win.launch_compare_editor());
         let win = this.clone();
@@ -628,16 +666,13 @@ impl JotWindow {
         });
 
         // Close request (window X, compositor "close window" / Hyprland
-        // Super+W) hides instead of quitting. Jot is a resident, toggle-style
-        // app — quitting the process would drop the Wayland clipboard offer,
-        // so text copied from Jot couldn't be pasted anywhere once the window
-        // closed. Matches Esc and the header close button, which already hide.
+        // Super+W, Alt+F4). Whatever the platform decides afterwards, the
+        // note and the config are flushed first.
         let win = this.clone();
         window.connect_close_request(move |_| {
             win.save_pending();
             let _ = win.state.borrow().config.save();
-            win.window.set_visible(false);
-            glib::Propagation::Stop
+            win.finish_close_request()
         });
 
         // Sweep orphan images once the UI has settled. `idle_add_local_once`
@@ -651,6 +686,26 @@ impl JotWindow {
         });
 
         this
+    }
+
+    /// Linux: hide instead of quitting. Jot is a resident, toggle-style app
+    /// and the Wayland clipboard offer belongs to the live client — quitting
+    /// would drop text copied from Jot before it could be pasted anywhere.
+    /// Matches Esc and the header close button, which also hide.
+    #[cfg(unix)]
+    fn finish_close_request(self: &Rc<Self>) -> glib::Propagation {
+        self.window.set_visible(false);
+        glib::Propagation::Stop
+    }
+
+    /// Windows: close really quits. GTK4 dropped StatusIcon so there is no
+    /// tray, and jot registers no global hotkey (Super+N is a Hyprland
+    /// binding), so a hidden window would be an unreachable process still
+    /// holding the database. The Win32 clipboard is system-owned once set,
+    /// so unlike Wayland nothing is lost by exiting.
+    #[cfg(windows)]
+    fn finish_close_request(self: &Rc<Self>) -> glib::Propagation {
+        glib::Propagation::Proceed
     }
 
     fn connect_callbacks(
@@ -674,11 +729,16 @@ impl JotWindow {
         let win = self.clone();
         delete_btn.connect_clicked(move |_| win.delete_current());
 
-        // Hide
+        // Hide (Linux) / close (Windows). On Windows we route through
+        // close() so the header button behaves exactly like the native X —
+        // it lands in connect_close_request, which saves and then quits.
         let win = self.clone();
         close_btn.connect_clicked(move |_| {
             win.save_pending();
+            #[cfg(unix)]
             win.window.set_visible(false);
+            #[cfg(windows)]
+            win.window.close();
         });
 
         // Settings popover
@@ -863,7 +923,15 @@ impl JotWindow {
             match keyval {
                 gdk::Key::Escape => {
                     win.save_pending();
+                    // Linux: hide — the Hyprland Super+N binding brings it
+                    // back. Windows: minimise instead, because a hidden
+                    // window has no taskbar entry and nothing would bring it
+                    // back; minimise is the native equivalent of "get out of
+                    // my way, I'll click you later".
+                    #[cfg(unix)]
                     win.window.set_visible(false);
+                    #[cfg(windows)]
+                    win.window.minimize();
                     glib::Propagation::Stop
                 }
                 gdk::Key::n if ctrl => {
@@ -989,21 +1057,35 @@ impl JotWindow {
             win.theme_controller.apply(theme);
         });
 
-        let opacity_label = gtk::Label::builder()
-            .label("Window opacity")
-            .halign(gtk::Align::Start)
-            .build();
-        let opacity = self.state.borrow().config.opacity;
-        let opacity_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.30, 1.0, 0.01);
-        opacity_scale.set_value(opacity);
-        opacity_scale.set_hexpand(true);
-        opacity_scale.set_draw_value(false);
-        let win = self.clone();
-        opacity_scale.connect_value_changed(move |scale| {
-            let v = scale.value();
-            win.state.borrow_mut().config.opacity = v;
-            win.apply_opacity();
-        });
+        appearance.append(&theme_label);
+        appearance.append(&theme_dropdown);
+
+        // Window opacity — Linux only. The GDK win32 backend has no
+        // per-pixel-alpha toplevel, so a translucent window renders as black
+        // wedges instead of translucency; opacity is pinned to 1.0 there
+        // (themes.rs) and the slider is dropped rather than disabled, so
+        // nobody reaches for a control that can only make things worse.
+        #[cfg(unix)]
+        {
+            let opacity_label = gtk::Label::builder()
+                .label("Window opacity")
+                .halign(gtk::Align::Start)
+                .build();
+            let opacity = self.state.borrow().config.opacity;
+            let opacity_scale =
+                gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.30, 1.0, 0.01);
+            opacity_scale.set_value(opacity);
+            opacity_scale.set_hexpand(true);
+            opacity_scale.set_draw_value(false);
+            let win = self.clone();
+            opacity_scale.connect_value_changed(move |scale| {
+                let v = scale.value();
+                win.state.borrow_mut().config.opacity = v;
+                win.apply_opacity();
+            });
+            appearance.append(&opacity_label);
+            appearance.append(&opacity_scale);
+        }
 
         let font_label = gtk::Label::builder()
             .label("Font size")
@@ -1022,17 +1104,19 @@ impl JotWindow {
             win.apply_font_size();
         });
 
+        // Super+N is a Hyprland binding (data/hyprland/jot.conf); on Windows
+        // there is no global hotkey, and Escape minimises instead of hiding.
+        #[cfg(unix)]
+        let hint_text = "Toggle: Super+N  ·  Escape hides";
+        #[cfg(windows)]
+        let hint_text = "Escape minimizes  ·  Alt+F4 closes";
         let hint = gtk::Label::builder()
-            .label("Toggle: Super+N  ·  Escape hides")
+            .label(hint_text)
             .halign(gtk::Align::Start)
             .build();
         hint.add_css_class("jot-row-time");
         hint.set_margin_top(6);
 
-        appearance.append(&theme_label);
-        appearance.append(&theme_dropdown);
-        appearance.append(&opacity_label);
-        appearance.append(&opacity_scale);
         appearance.append(&font_label);
         appearance.append(&font_scale);
         appearance.append(&hint);
@@ -1068,7 +1152,7 @@ impl JotWindow {
 
         let save_btn = gtk::Button::builder()
             .label("Save")
-            .tooltip_text("Save and persist to ~/.config/jot/config.toml")
+            .tooltip_text(format!("Save and persist to {}", config_path_display()))
             .build();
         save_btn.add_css_class("jot-accent");
 
@@ -1096,7 +1180,10 @@ impl JotWindow {
         lang_entry.add_css_class("jot-search");
 
         let key_note = gtk::Label::builder()
-            .label("Stored in plain text at ~/.config/jot/config.toml.")
+            .label(format!(
+                "Stored in plain text at {}.",
+                config_path_display()
+            ))
             .halign(gtk::Align::Start)
             .wrap(true)
             .max_width_chars(38)
@@ -1151,16 +1238,28 @@ impl JotWindow {
         voice.append(&key_note);
 
         // ── Recorder tab ────────────────────────────────────────────────
+        // Kept on every platform: fps and quality drive the compare
+        // editor's GIF export too, which ships on Windows. Only the copy
+        // changes there — no screen recorder, and Super+R is a Hyprland
+        // keybind that doesn't exist.
         let recorder = gtk::Box::new(gtk::Orientation::Vertical, 8);
 
+        #[cfg(unix)]
+        let rec_title_text = "GIF recorder";
+        #[cfg(windows)]
+        let rec_title_text = "GIF export";
         let rec_title = gtk::Label::builder()
-            .label("GIF recorder")
+            .label(rec_title_text)
             .halign(gtk::Align::Start)
             .build();
         rec_title.add_css_class("jot-title");
 
+        #[cfg(unix)]
+        let rec_blurb_text = "Settings for the screen-region recorder (Super+R). Saved alongside the rest of your preferences.";
+        #[cfg(windows)]
+        let rec_blurb_text = "Settings for the GIF export in the comparison editor. Saved alongside the rest of your preferences.";
         let rec_blurb = gtk::Label::builder()
-            .label("Settings for the screen-region recorder (Super+R). Saved alongside the rest of your preferences.")
+            .label(rec_blurb_text)
             .halign(gtk::Align::Start)
             .wrap(true)
             .max_width_chars(38)
@@ -1223,7 +1322,7 @@ impl JotWindow {
 
         let rec_save_btn = gtk::Button::builder()
             .label("Save")
-            .tooltip_text("Persist to ~/.config/jot/config.toml")
+            .tooltip_text(format!("Persist to {}", config_path_display()))
             .build();
         rec_save_btn.add_css_class("jot-accent");
         let win = self.clone();
@@ -1285,9 +1384,13 @@ impl JotWindow {
         data.append(&export_blurb);
         data.append(&export_all_btn);
 
+        #[cfg(unix)]
+        let recorder_tab_title = "Recorder";
+        #[cfg(windows)]
+        let recorder_tab_title = "GIF";
         stack.add_titled(&appearance, Some("appearance"), "Appearance");
         stack.add_titled(&voice, Some("voice"), "Voice");
-        stack.add_titled(&recorder, Some("recorder"), "Recorder");
+        stack.add_titled(&recorder, Some("recorder"), recorder_tab_title);
         stack.add_titled(&data, Some("data"), "Data");
 
         let switcher = gtk::StackSwitcher::new();
@@ -2517,10 +2620,13 @@ impl JotWindow {
         });
         self.update_mic_button_state();
 
+        let generation = self.voice_generation.get() + 1;
+        self.voice_generation.set(generation);
+
         let win = self.clone();
         glib::spawn_future_local(async move {
             while let Ok(evt) = evt_rx.recv().await {
-                win.handle_voice_event(evt);
+                win.handle_voice_event(generation, evt);
             }
         });
     }
@@ -2534,7 +2640,12 @@ impl JotWindow {
         }
     }
 
-    fn handle_voice_event(self: &Rc<Self>, evt: TranscriptEvent) {
+    fn handle_voice_event(self: &Rc<Self>, generation: u64, evt: TranscriptEvent) {
+        // Gate EVERY arm, not just Chunk: a dead session's late Finished
+        // would call voice_finalise and kill a live newer session.
+        if generation != self.voice_generation.get() {
+            return;
+        }
         match evt {
             TranscriptEvent::Recording => {
                 if let Some(s) = self.voice_state.borrow_mut().as_mut() {
@@ -2654,6 +2765,9 @@ impl JotWindow {
 
     // ────────────────────────────── export ────────────────────────────
 
+    /// Linux only — `recorder_window` isn't compiled on Windows, and the
+    /// button that calls this isn't built there either.
+    #[cfg(unix)]
     fn launch_gif_recorder(self: &Rc<Self>) {
         let Some(app) = self.window.application() else {
             tracing::warn!("no application — cannot start recorder");
@@ -2817,10 +2931,25 @@ impl JotWindow {
                             "jot-export-{}",
                             chrono::Local::now().format("%Y-%m-%d")
                         ));
+                        // export_all_md skips (and logs) notes that fail
+                        // individually, so Ok(n) can be a partial result —
+                        // say so instead of toasting a clean success.
+                        let total = notes.len();
                         let toast = match crate::export::export_all_md(&notes, &target, false) {
-                            Ok(n) => adw::Toast::builder()
+                            Ok(n) if n == total => adw::Toast::builder()
                                 .title(format!("Exported {n} note(s) to {}", target.display()))
                                 .timeout(4)
+                                .build(),
+                            Ok(0) => adw::Toast::builder()
+                                .title("Export failed — no notes could be written (see log)")
+                                .timeout(5)
+                                .build(),
+                            Ok(n) => adw::Toast::builder()
+                                .title(format!(
+                                    "Exported {n} of {total} notes — {} failed, see log",
+                                    total - n
+                                ))
+                                .timeout(5)
                                 .build(),
                             Err(e) => adw::Toast::builder()
                                 .title(format!("Export failed: {e}"))
@@ -3167,6 +3296,15 @@ fn build_title(subtitle: &str) -> gtk::Box {
 
 fn app_subtitle() -> String {
     "floating notes".to_string()
+}
+
+/// The settings file path as the user should see it. Asking config.rs
+/// instead of hardcoding `~/.config/jot/config.toml` keeps the settings
+/// copy honest on Windows, where it lives under %APPDATA%.
+fn config_path_display() -> String {
+    crate::config::config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "your config file".to_string())
 }
 
 impl JotWindow {

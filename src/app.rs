@@ -7,6 +7,7 @@ use gtk::{gio, glib};
 
 use crate::compare_editor::launch_compare_editor;
 use crate::maintenance;
+#[cfg(unix)]
 use crate::recorder_window::launch_recorder;
 use crate::window::JotWindow;
 
@@ -46,8 +47,21 @@ pub fn run() -> glib::ExitCode {
             .collect();
 
         if args.iter().any(|a| a == "--record-gif") {
-            let main = win_ref.borrow().as_ref().map(|w| w.window.clone());
-            launch_recorder(app, main);
+            // The recorder is Wayland-only (slurp + wf-recorder). Keep the
+            // arm on every platform so the if/else chain — and the --compare
+            // arm below it — stays identical, and just swap the body.
+            #[cfg(unix)]
+            {
+                let main = {
+                    let slot = win_ref.borrow();
+                    live(&slot).map(|w| w.window.clone())
+                };
+                launch_recorder(app, main);
+            }
+            #[cfg(not(unix))]
+            {
+                tracing::warn!("--record-gif is not supported on this platform");
+            }
         } else if let Some(pos) = args.iter().position(|a| a == "--compare") {
             // `jot --compare <before> <after>` opens the comparison editor.
             // The two paths are the next non-flag args; relative ones resolve
@@ -61,10 +75,21 @@ pub fn run() -> glib::ExitCode {
                 .map(|a| resolve_path(cwd.as_deref(), a))
                 .collect();
             if let [before, after] = paths.as_slice() {
-                let main = win_ref.borrow().as_ref().map(|w| w.window.clone());
+                let main = {
+                    let slot = win_ref.borrow();
+                    live(&slot).map(|w| w.window.clone())
+                };
                 launch_compare_editor(app, main, before.clone(), after.clone());
             } else {
+                // Windows links the GUI subsystem, so stderr is a null
+                // handle and this would be swallowed whole — the log file
+                // is the only channel that survives there (see main.rs).
+                #[cfg(unix)]
                 eprintln!("jot --compare needs two files: jot --compare antes.gif depois.gif");
+                #[cfg(windows)]
+                tracing::error!(
+                    "jot --compare needs two files: jot --compare before.gif after.gif"
+                );
             }
         } else {
             app.activate();
@@ -75,12 +100,41 @@ pub fn run() -> glib::ExitCode {
     let win_ref = window.clone();
     app.connect_activate(move |app| {
         let mut slot = win_ref.borrow_mut();
+        // Windows: the X really destroys the window (finish_close_request →
+        // Propagation::Proceed). gtk_window_destroy() removes it from the
+        // application, but the Rc here keeps the GObject alive; re-showing a
+        // destroyed toplevel is a GTK error and its X no longer works. Drop
+        // the corpse so the None arm rebuilds. Never true on Linux — there
+        // the window is only ever hidden and keeps its application.
+        if slot
+            .as_ref()
+            .is_some_and(|w| w.window.application().is_none())
+        {
+            *slot = None;
+        }
         match slot.as_ref() {
             Some(existing) => {
+                // Linux: activate IS the Super+N toggle — the Hyprland
+                // keybind relaunches jot and a second press hides.
+                #[cfg(unix)]
                 if existing.window.is_visible() {
                     existing.window.set_visible(false);
                 } else {
                     existing.window.set_visible(true);
+                    existing.window.present();
+                }
+                // Windows: relaunching jot.exe is the only way to reach a
+                // running instance (no tray, no global hotkey), so activate
+                // must always mean "bring to front". Hiding here would drop
+                // the taskbar entry and strand a live process holding the DB
+                // — the same failure the close/Esc gates in window.rs avoid.
+                // Note is_visible() is gtk_widget_is_visible and stays true
+                // while minimized, so the toggle would also swallow an
+                // Esc-minimized window.
+                #[cfg(windows)]
+                {
+                    existing.window.set_visible(true);
+                    existing.window.unminimize();
                     existing.window.present();
                 }
             }
@@ -93,6 +147,13 @@ pub fn run() -> glib::ExitCode {
     });
 
     app.run()
+}
+
+/// The main-window slot, filtered for liveness: a destroyed window (Windows
+/// close path) has been released by its application and must not be handed
+/// out as a parent/return-target.
+fn live(slot: &Option<Rc<JotWindow>>) -> Option<&Rc<JotWindow>> {
+    slot.as_ref().filter(|w| w.window.application().is_some())
 }
 
 /// Resolve a possibly-relative CLI path against the command line's cwd.

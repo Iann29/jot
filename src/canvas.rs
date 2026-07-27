@@ -27,6 +27,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::GifQuality;
 
+// ─────────────────────────── process helpers ─────────────────────────
+
+/// Build a `Command` for one of the ffmpeg-family tools.
+///
+/// Every spawn in this module (and the preview decoder in
+/// `compare_editor`) goes through here so the Windows console-suppression
+/// flag lives in exactly one place: jot is a GUI binary with no console of
+/// its own, and ffmpeg/ffprobe are console-subsystem executables, so
+/// Windows would allocate a fresh black console window for each child —
+/// three per GIF export plus one per preview decode. On unix there is
+/// nothing to suppress, so this is a plain `Command::new`.
+#[cfg(unix)]
+pub(crate) fn ff_command(exe: &str) -> Command {
+    Command::new(exe)
+}
+
+/// See the unix twin above. `0x0800_0000` is Win32's `CREATE_NO_WINDOW`.
+#[cfg(windows)]
+pub(crate) fn ff_command(exe: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = Command::new(exe);
+    cmd.creation_flags(0x0800_0000);
+    cmd
+}
+
 // ───────────────────────────── Scene model ───────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,7 +175,7 @@ pub struct MediaInfo {
 /// GIFs written by some encoders).
 pub fn probe(path: &Path) -> Result<MediaInfo> {
     crate::gif_recorder::require_tool("ffprobe")?;
-    let out = Command::new("ffprobe")
+    let out = ff_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -218,7 +243,7 @@ pub fn is_image(path: &Path) -> bool {
 /// Last-resort duration: count decoded frames and divide by the average
 /// frame rate. Slower (decodes the whole file) but always works.
 fn count_frames_duration(path: &Path) -> Option<f64> {
-    let out = Command::new("ffprobe")
+    let out = ff_command("ffprobe")
         .args([
             "-v",
             "error",
@@ -285,6 +310,16 @@ pub enum Stack {
     Vertical,
 }
 
+/// Family name used for the labels. It only ever reaches ffmpeg as the
+/// `font=` *fallback* (see `drawtext_expr`), for the case where
+/// `resolve_font` can't hand us a concrete file — but "Sans" is a
+/// fontconfig alias with no meaning outside fontconfig, so each OS gets a
+/// name its own ffmpeg build has a chance of resolving.
+#[cfg(unix)]
+const DEFAULT_LABEL_FONT: &str = "Sans Bold";
+#[cfg(windows)]
+const DEFAULT_LABEL_FONT: &str = "Segoe UI Semibold";
+
 #[derive(Debug, Clone)]
 pub struct BeforeAfterOptions {
     /// Height each clip is scaled to (horizontal) or width (vertical).
@@ -316,7 +351,7 @@ impl Default for BeforeAfterOptions {
             background: "#0e0e12".into(),
             labels: Some(("Antes".into(), "Depois".into())),
             label_height: 44,
-            label_font: "Sans Bold".into(),
+            label_font: DEFAULT_LABEL_FONT.into(),
             label_size: 22,
             label_color: "#e8e8ec".into(),
             fps: 24,
@@ -678,7 +713,7 @@ fn drawtext_expr(
 ) -> String {
     let mut s = String::from("drawtext=");
     match resolved_font {
-        Some(p) => s.push_str(&format!("fontfile='{}':", p.display())),
+        Some(p) => s.push_str(&format!("fontfile='{}':", escape_filter_path(p))),
         None => s.push_str(&format!("font='{}':", family)),
     }
     s.push_str(&format!("text='{}':", escape_drawtext(content)));
@@ -694,6 +729,23 @@ fn drawtext_expr(
         ));
     }
     s
+}
+
+/// Escape a filesystem path that lands *inside* the filtergraph string —
+/// today only `drawtext`'s `fontfile=`.
+///
+/// A Windows font path is `C:\Windows\Fonts\segoeuib.ttf`: the backslash is
+/// ffmpeg's own escape character and the drive colon separates filter
+/// options, so passing it raw mangles the graph and drawtext never finds
+/// the font. Backslashes become forward slashes (which Windows accepts
+/// everywhere) and the colon is escaped. Order matters — slashes first, or
+/// the backslash we insert for the colon gets rewritten too.
+///
+/// Inert on unix: font paths there have neither character. This must NOT
+/// be used on media/output paths — those are passed as their own argv
+/// element via `cmd.arg()` and have to stay byte-for-byte raw.
+fn escape_filter_path(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/").replace(':', "\\:")
 }
 
 /// Escape a string for use inside `text='…'` in a filtergraph. We wrap in
@@ -715,9 +767,9 @@ fn to_ffmpeg_color(c: &str) -> String {
     }
 }
 
-/// Resolve the first text layer's font family to a concrete file via
-/// `fc-match`, so drawtext doesn't depend on ffmpeg being built with
-/// fontconfig. None → fall back to the `font=` family keyword.
+/// Resolve the first text layer's font family to a concrete file, so
+/// drawtext doesn't depend on ffmpeg being built with fontconfig.
+/// None → fall back to the `font=` family keyword.
 fn resolve_scene_font(scene: &Scene) -> Option<PathBuf> {
     let family = scene.layers.iter().find_map(|l| match &l.kind {
         LayerKind::Text { font, .. } => Some(font.clone()),
@@ -726,8 +778,10 @@ fn resolve_scene_font(scene: &Scene) -> Option<PathBuf> {
     resolve_font(&family)
 }
 
+/// unix: ask fontconfig, the authority on what "Sans Bold" means here.
+#[cfg(unix)]
 fn resolve_font(family: &str) -> Option<PathBuf> {
-    let out = Command::new("fc-match")
+    let out = ff_command("fc-match")
         .args(["-f", "%{file}", family])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -742,6 +796,34 @@ fn resolve_font(family: &str) -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(p))
     }
+}
+
+/// Windows: there is no fontconfig and no `fc-match`, so probe the fonts
+/// that ship with the OS and take the first that exists. The family string
+/// is deliberately ignored — the only text we draw is the two labels, and
+/// any bold UI face reads correctly there; what matters is returning a
+/// *file*, which is exactly what keeps drawtext independent of a
+/// fontconfig-enabled ffmpeg build. `segoeuib.ttf` is present on every
+/// Windows 7+ install, so in practice this always succeeds.
+#[cfg(windows)]
+fn resolve_font(_family: &str) -> Option<PathBuf> {
+    let fonts = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("Fonts");
+    [
+        // Segoe UI Bold — the native equivalent of "Sans Bold" — then
+        // progressively weaker fallbacks, ending in regular weights.
+        "segoeuib.ttf",
+        "seguisb.ttf",
+        "arialbd.ttf",
+        "calibrib.ttf",
+        "segoeui.ttf",
+        "arial.ttf",
+    ]
+    .into_iter()
+    .map(|f| fonts.join(f))
+    .find(|p| p.is_file())
 }
 
 // ─────────────────────────────── compose ─────────────────────────────
@@ -832,7 +914,7 @@ fn run_composite(
     encode_args: &[String],
     out: &Path,
 ) -> Result<()> {
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ff_command("ffmpeg");
     cmd.arg("-y").args(["-loglevel", "error"]);
     for inp in inputs {
         for a in &inp.pre_args {
@@ -852,7 +934,7 @@ fn run_composite(
 /// accumulates a histogram, not the frames).
 fn run_palettegen(src: &Path, palette: &Path, fps: u32, quality: GifQuality) -> Result<()> {
     let stats = crate::gif_recorder::quality_palette_stats(quality);
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ff_command("ffmpeg");
     cmd.arg("-y")
         .args(["-loglevel", "error"])
         .arg("-i")
@@ -874,7 +956,7 @@ fn run_paletteuse(
     quality: GifQuality,
 ) -> Result<()> {
     let dither = crate::gif_recorder::quality_dither(quality);
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ff_command("ffmpeg");
     cmd.arg("-y").args(["-loglevel", "error"]);
     cmd.arg("-i").arg(src).arg("-i").arg(palette);
     cmd.args([
@@ -904,7 +986,7 @@ fn run_checked(mut cmd: Command, stage: &str) -> Result<()> {
 
 fn ensure_work_dir() -> Result<PathBuf> {
     let dir = dirs::cache_dir()
-        .ok_or_else(|| anyhow!("no XDG cache dir"))?
+        .ok_or_else(|| anyhow!("no cache directory"))?
         .join("jot")
         .join("compose");
     std::fs::create_dir_all(&dir)?;

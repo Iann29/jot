@@ -2,12 +2,12 @@
 name = "jot"
 version = "1.6.0"
 edition = "2021"
-description = "Lightning-fast floating notes for tiling Wayland compositors"
+description = "Lightning-fast floating notes for Linux and Windows"
 license = "MIT"
 authors = ["Ian <admin@amageweb.com>"]
 repository = "https://github.com/Iann29/jot"
 readme = "README.md"
-keywords = ["notes", "gtk4", "linux", "hyprland", "wayland"]
+keywords = ["notes", "gtk4", "linux", "windows"]
 categories = ["gui"]
 
 [dependencies]
@@ -27,10 +27,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 once_cell = "1"
 uuid = { version = "1", features = ["v4"] }
 
-# GIF recorder needs raw kill() so we can SIGINT wf-recorder (graceful
-# MP4 flush). std::process::Child::kill() sends SIGKILL only.
-libc = "0.2"
-
 # Voice transcription stack — Groq Whisper Large v3 Turbo, VAD-chunked.
 # cpal captures continuously; a small RMS-based voice-activity detector
 # slices speech into utterance-shaped chunks at silences; reqwest POSTs
@@ -47,6 +43,22 @@ sha2 = "0.10"
 hex = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 walkdir = "2"
+
+[target.'cfg(unix)'.dependencies]
+# GIF recorder needs raw kill() so we can SIGINT wf-recorder (graceful
+# MP4 flush). std::process::Child::kill() sends SIGKILL only. The whole
+# capture pipeline is cfg(unix), and libc has no kill()/pid_t on Windows,
+# so the dependency is gated exactly like the code that uses it.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# MessageBoxW only — the panic hook needs *some* visible channel because
+# the exe is linked with the GUI subsystem, where stderr is a null handle.
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the app icon + a longPathAware manifest into jot.exe (build.rs).
+winresource = "0.1"
 
 [profile.release]
 opt-level = 3

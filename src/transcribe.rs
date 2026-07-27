@@ -51,6 +51,11 @@ const MIN_CHUNK_MS: u32 = 1_400;
 const MAX_CHUNK_MS: u32 = 25_000;
 /// Drop chunks that contain effectively no voiced audio.
 const MIN_VOICED_FRACTION: f32 = 0.04;
+/// How long we wait for the capture thread to report its sample rate before
+/// giving up. cpal's WASAPI host can `panic!` on an unexpected COM failure and
+/// has other unwrap paths; without a bound, such a thread never publishes and
+/// the session thread parks forever — no `Finished`, UI stuck in "recording".
+const AUDIO_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub enum TranscriptEvent {
@@ -114,18 +119,36 @@ fn run_session(
     let ready = Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
     let ready_for_thread = ready.clone();
 
+    let evt_tx_for_audio = evt_tx.clone();
     std::thread::Builder::new()
         .name("jot-audio".into())
-        .spawn(move || run_audio_capture(audio_tx, stop_audio_rx, ready_for_thread))
+        .spawn(move || {
+            run_audio_capture(audio_tx, stop_audio_rx, ready_for_thread, evt_tx_for_audio)
+        })
         .context("spawn audio thread")?;
 
     let sample_rate = {
         let (mtx, cvar) = &*ready;
         let mut g = mtx.lock().unwrap();
+        let deadline = Instant::now() + AUDIO_START_TIMEOUT;
         while g.is_none() {
-            g = cvar.wait(g).unwrap();
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, res) = cvar.wait_timeout(g, remaining).unwrap();
+            g = next;
+            if res.timed_out() && g.is_none() {
+                break;
+            }
         }
-        g.take().unwrap()
+        match g.take() {
+            Some(r) => r,
+            None => Err(anyhow!(
+                "audio capture did not start within {}s",
+                AUDIO_START_TIMEOUT.as_secs()
+            )),
+        }
     }
     .inspect_err(|_e| {
         let _ = stop_audio_tx.send(());
@@ -434,10 +457,14 @@ fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
 
 // ─────────────────────────── audio capture ───────────────────────────
 
+// `evt_tx` feeds the Windows-only stream-error path below; on unix the
+// parameter is deliberately unused (ALSA errors are advisory, see err_fn).
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn run_audio_capture(
     audio_tx: std::sync::mpsc::Sender<Vec<i16>>,
     stop_rx: std::sync::mpsc::Receiver<()>,
     ready: Arc<(std::sync::Mutex<Option<Result<u32>>>, std::sync::Condvar)>,
+    evt_tx: Sender<TranscriptEvent>,
 ) {
     let publish = |result: Result<u32>| {
         let (mtx, cvar) = &*ready;
@@ -486,8 +513,42 @@ fn run_audio_capture(
         "audio device='{device_name}' rate={sample_rate} ch={channels} fmt={sample_format:?}"
     );
 
-    let err_fn = |e: cpal::StreamError| tracing::error!("audio stream error: {e}");
+    // The error callback's meaning differs per cpal host, so its severity
+    // must too:
+    //   * ALSA's input worker `continue`s after every error_callback — the
+    //     error is advisory and the stream keeps capturing. Tearing the
+    //     session down here would kill dictation on recoverable hiccups.
+    //   * WASAPI's `run_input` breaks its loop on EVERY error_callback path
+    //     (device invalidation, GetBuffer failures, …) — the worker thread
+    //     exits and the stream is permanently dead. Logging alone left the
+    //     UI in "recording" forever with no chunks and no error, so surface
+    //     a real Error plus the Finished that lets the UI unwind.
+    // Only one match arm is evaluated, so exactly one closure instance
+    // exists per session.
+    #[cfg(not(windows))]
+    let make_err_fn = || |e: cpal::StreamError| tracing::error!("audio stream error: {e}");
+    #[cfg(windows)]
+    let make_err_fn = || {
+        let evt_tx = evt_tx.clone();
+        let mut reported = false;
+        move |e: cpal::StreamError| {
+            tracing::error!("audio stream error: {e}");
+            // WASAPI kills the stream after the first error, but belt and
+            // braces: one Error/Finished pair is enough.
+            if reported {
+                return;
+            }
+            reported = true;
+            let _ =
+                evt_tx.send_blocking(TranscriptEvent::Error(format!("audio stream error: {e}")));
+            let _ = evt_tx.send_blocking(TranscriptEvent::Finished);
+        }
+    };
 
+    // WASAPI picks the format from the device's mix format, which cpal reports
+    // as one of U8/I16/I32/I64/F32 — never U16. I32 (24-bit-in-32 interfaces)
+    // and U8 used to fall through to the abort arm below, killing transcription
+    // outright on those devices. The U16 arm stays: harmless, and ALSA uses it.
     let stream_result = match sample_format {
         cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(
             &stream_cfg,
@@ -497,7 +558,18 @@ fn run_audio_capture(
                     let _ = tx.send(downmix_i16(data, channels));
                 }
             },
-            err_fn,
+            make_err_fn(),
+            None,
+        ),
+        cpal::SampleFormat::I32 => device.build_input_stream::<i32, _, _>(
+            &stream_cfg,
+            {
+                let tx = audio_tx.clone();
+                move |data, _| {
+                    let _ = tx.send(i32_to_i16_mono(data, channels));
+                }
+            },
+            make_err_fn(),
             None,
         ),
         cpal::SampleFormat::F32 => device.build_input_stream::<f32, _, _>(
@@ -508,7 +580,7 @@ fn run_audio_capture(
                     let _ = tx.send(f32_to_i16_mono(data, channels));
                 }
             },
-            err_fn,
+            make_err_fn(),
             None,
         ),
         cpal::SampleFormat::U16 => device.build_input_stream::<u16, _, _>(
@@ -519,7 +591,18 @@ fn run_audio_capture(
                     let _ = tx.send(u16_to_i16_mono(data, channels));
                 }
             },
-            err_fn,
+            make_err_fn(),
+            None,
+        ),
+        cpal::SampleFormat::U8 => device.build_input_stream::<u8, _, _>(
+            &stream_cfg,
+            {
+                let tx = audio_tx.clone();
+                move |data, _| {
+                    let _ = tx.send(u8_to_i16_mono(data, channels));
+                }
+            },
+            make_err_fn(),
             None,
         ),
         other => {
@@ -531,7 +614,17 @@ fn run_audio_capture(
     let stream = match stream_result {
         Ok(s) => s,
         Err(e) => {
-            publish(Err(anyhow!("build input stream: {e}")));
+            // The most common cause on Windows is the microphone privacy
+            // toggle, which surfaces as a bare HRESULT with no hint at all.
+            #[cfg(windows)]
+            let err = anyhow!(
+                "build input stream: {e} — if this is a permission error, turn on \
+                 Settings > Privacy & security > Microphone > \
+                 \"Let desktop apps access your microphone\""
+            );
+            #[cfg(not(windows))]
+            let err = anyhow!("build input stream: {e}");
+            publish(Err(err));
             return;
         }
     };
@@ -553,6 +646,38 @@ fn downmix_i16(samples: &[i16], channels: usize) -> Vec<i16> {
         .chunks_exact(channels)
         .map(|chunk| {
             let avg: i32 = chunk.iter().map(|&s| s as i32).sum::<i32>() / channels as i32;
+            avg.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        })
+        .collect()
+}
+
+/// 32-bit signed PCM (typically 24-bit samples left-justified in an i32, which
+/// WASAPI reports for pro/USB interfaces). Shifting right by 16 keeps the top
+/// 16 bits — the same amplitude, just the resolution Whisper wants.
+fn i32_to_i16_mono(samples: &[i32], channels: usize) -> Vec<i16> {
+    if channels <= 1 {
+        return samples.iter().map(|&s| (s >> 16) as i16).collect();
+    }
+    samples
+        .chunks_exact(channels)
+        .map(|chunk| {
+            let avg: i64 = chunk.iter().map(|&s| (s >> 16) as i64).sum::<i64>() / channels as i64;
+            avg.clamp(i16::MIN as i64, i16::MAX as i64) as i16
+        })
+        .collect()
+}
+
+/// 8-bit unsigned PCM: midpoint 128, so re-centre then scale to full range.
+fn u8_to_i16_mono(samples: &[u8], channels: usize) -> Vec<i16> {
+    let convert = |u: u8| -> i16 { (u as i16 - 128) << 8 };
+    if channels <= 1 {
+        return samples.iter().copied().map(convert).collect();
+    }
+    samples
+        .chunks_exact(channels)
+        .map(|chunk| {
+            let avg: i32 =
+                chunk.iter().map(|&u| (u as i32 - 128) << 8).sum::<i32>() / channels as i32;
             avg.clamp(i16::MIN as i32, i16::MAX as i32) as i16
         })
         .collect()

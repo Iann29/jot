@@ -2,7 +2,7 @@
 
 # Jot
 
-**Lightning-fast floating notes for tiling Wayland compositors.**
+**Lightning-fast floating notes for Linux (tiling Wayland compositors) and Windows.**
 
 A tiny, native Rust + GTK 4 app that pops over whatever you're doing, eats one thought, and gets out of the way.
 
@@ -55,6 +55,51 @@ sudo pacman -S --needed gtk4 libadwaita sqlite alsa-lib rust
 git clone https://github.com/Iann29/jot.git
 cd jot && ./scripts/install.sh
 ```
+
+### Windows
+
+Grab `jot-vX.Y.Z-x86_64-windows.zip` from the [latest release](https://github.com/Iann29/jot/releases/latest), unzip it anywhere, and run `jot.exe`.
+
+It's a **portable** build: the whole GTK4 + libadwaita runtime lives in that folder, nothing is installed and nothing is written to the registry. Deleting the folder removes the app; your notes stay put. Don't move `jot.exe` out of the folder — it resolves its DLLs, icon theme and GSettings schemas relative to itself.
+
+Optional, for the before/after GIF compare editor:
+
+```powershell
+winget install Gyan.FFmpeg
+```
+
+ffmpeg isn't bundled (it would roughly double the download), so the compare editor looks for `ffmpeg` and `ffprobe` on your `PATH` and tells you what's missing if they aren't there. Restart Jot after installing.
+
+**Not on Windows:** the `Super+R` screen-region GIF *recorder* is Linux/Wayland only — it drives `wf-recorder`, `slurp` and `wl-copy`, which have no Windows counterpart. GIF export from the compare editor works fine. The window is also fully opaque (the transparency slider is hidden — per-pixel alpha isn't wired up in GDK's win32 backend yet), `Esc` minimizes instead of hiding, and `Alt+F4` / the close button saves and quits.
+
+Where things live:
+
+```
+%LOCALAPPDATA%\jot\notes.db     SQLite database (WAL mode)
+%LOCALAPPDATA%\jot\images\      Pasted / dropped images
+%LOCALAPPDATA%\jot\backups\     Daily snapshots (last 7)
+%LOCALAPPDATA%\jot\jot.log      Runtime log
+%APPDATA%\jot\config.toml       Window size, theme, font, Groq API key
+%LOCALAPPDATA%\jot-panic.log    Last crash message (if any)
+```
+
+<details>
+<summary><strong>Troubleshooting</strong></summary>
+
+**Blank, black or garbled window.** GTK 4.14+ picks a GPU renderer by default, which falls over on RDP sessions, VMs and machines with no Vulkan driver. Force the software path:
+
+```powershell
+$env:GSK_RENDERER = "cairo"
+.\jot.exe
+```
+
+`gl` is worth a try too. Set `GSK_RENDERER` as a user environment variable to make it stick.
+
+**`jot.exe` closes immediately with no window.** Check `%LOCALAPPDATA%\jot-panic.log` and `%LOCALAPPDATA%\jot\jot.log`. If neither exists the process died before Rust ran, which almost always means a file was removed from the unzipped folder — re-extract the zip.
+
+**SmartScreen warns about an unknown publisher.** These builds aren't code-signed. *More info → Run anyway*, or verify your download against the `.sha256` published next to the zip on the release page.
+
+</details>
 
 ## Hyprland integration
 

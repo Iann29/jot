@@ -1,4 +1,16 @@
-//! Screen-region GIF recorder for Wayland (Hyprland-friendly).
+//! Screen-region GIF recorder for Wayland (Hyprland-friendly), plus the
+//! portable media helpers shared with the compare editor.
+//!
+//! The module is split in two halves:
+//!
+//! * **Capture half — `cfg(unix)`.** Everything from `RecorderCmd` down to
+//!   `ChildGuard`: it drives slurp/wf-recorder over wlr-screencopy and
+//!   SIGINTs children through `libc::kill`, neither of which exists on
+//!   Windows. `recorder_window.rs`, its only consumer, is gated out there.
+//! * **Portable half — compiled everywhere.** `which`, `require_tool`,
+//!   `ensure_gif_output_dir`, `file_timestamp`, `open_path`,
+//!   `copy_gif_to_clipboard` and the `quality_*` presets. These back the
+//!   before/after compare editor's GIF export, which ships on Windows too.
 //!
 //! Pipeline:
 //!
@@ -33,16 +45,26 @@
 //!   GTK directly.
 
 use anyhow::{anyhow, bail, Context, Result};
-use async_channel::{Receiver, Sender};
-use std::io::Read;
 use std::path::{Path, PathBuf};
+// Everything below is capture-half only: the portable helpers run no
+// subprocesses (they go through gio/gdk), so leaving these ungated would
+// be an unused-import error on Windows under -D warnings.
+#[cfg(unix)]
+use async_channel::{Receiver, Sender};
+#[cfg(unix)]
+use std::io::Read;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 const TICK_INTERVAL: Duration = Duration::from_millis(200);
+#[cfg(unix)]
 const GRACEFUL_KILL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Commands the UI sends to the worker.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 pub enum RecorderCmd {
     /// Finish the recording and start GIF conversion.
@@ -52,6 +74,7 @@ pub enum RecorderCmd {
 }
 
 /// Events the worker emits. All consumed via `glib::spawn_future_local`.
+#[cfg(unix)]
 #[derive(Debug, Clone)]
 pub enum RecorderEvent {
     /// `slurp` is up — the editor should hide itself if open.
@@ -71,6 +94,7 @@ pub enum RecorderEvent {
     Error(String),
 }
 
+#[cfg(unix)]
 pub struct RecorderHandle {
     pub cmd_tx: Sender<RecorderCmd>,
 }
@@ -78,6 +102,7 @@ pub struct RecorderHandle {
 /// Spin up the recorder worker. Returns a command sender and an event
 /// receiver. Dropping `RecorderHandle` is fine — the receiver also being
 /// dropped will cause the worker to clean up and exit.
+#[cfg(unix)]
 pub fn start(
     fps: u32,
     quality: crate::config::GifQuality,
@@ -101,6 +126,7 @@ pub fn start(
 
 // ─────────────────────────── Session loop ────────────────────────────
 
+#[cfg(unix)]
 fn run_session(
     fps: u32,
     quality: crate::config::GifQuality,
@@ -227,6 +253,7 @@ fn run_session(
 
 /// Run `slurp` and return `Some(region)` if the user picked one, or
 /// `None` if they pressed Esc (slurp exits non-zero with empty stdout).
+#[cfg(unix)]
 fn run_slurp() -> Result<Option<String>> {
     let out = Command::new("slurp")
         .stdin(Stdio::null())
@@ -248,6 +275,7 @@ fn run_slurp() -> Result<Option<String>> {
 
 // ────────────────────────── ffmpeg pipeline ──────────────────────────
 
+#[cfg(unix)]
 enum ConvertOutcome {
     Done,
     Cancelled,
@@ -255,6 +283,11 @@ enum ConvertOutcome {
 
 /// Two-pass palette pipeline. Identical to scripts/record-gif.sh: yields
 /// sharp text and clean gradients in a small GIF.
+///
+/// Pure ffmpeg CLI and portable in principle — it is gated only because
+/// its MP4 input comes from wf-recorder. A future Windows capture backend
+/// (gdigrab/DXGI) can reuse it verbatim.
+#[cfg(unix)]
 fn convert_to_gif(
     mp4: &Path,
     palette: &Path,
@@ -331,6 +364,7 @@ fn convert_to_gif(
     Ok(ConvertOutcome::Done)
 }
 
+#[cfg(unix)]
 struct CapturedOutput {
     status: std::process::ExitStatus,
     stderr: String,
@@ -339,6 +373,7 @@ struct CapturedOutput {
 /// Poll the child until it exits, while also listening for a Cancel
 /// command. Returns `None` if cancelled, `Some(output)` otherwise.
 /// Stderr is captured (best-effort) for error reporting.
+#[cfg(unix)]
 fn wait_with_cancel(
     child: &mut ChildGuard,
     cmd_rx: &Receiver<RecorderCmd>,
@@ -365,11 +400,17 @@ fn wait_with_cancel(
 /// On Drop: SIGINT → wait up to GRACEFUL_KILL_TIMEOUT → SIGKILL. The
 /// `wf-recorder` graceful path is what gives us a valid MP4 (it needs
 /// to write the trailer on SIGINT, not SIGKILL).
+///
+/// POSIX-only: the graceful path is `libc::kill(pid, SIGINT)`, and
+/// `std::process::Child::kill()` (the only portable option) is SIGKILL,
+/// which would truncate the MP4.
+#[cfg(unix)]
 struct ChildGuard {
     child: Option<Child>,
     name: &'static str,
 }
 
+#[cfg(unix)]
 impl ChildGuard {
     fn new(child: Child, name: &'static str) -> Self {
         Self {
@@ -442,6 +483,7 @@ impl ChildGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else {
@@ -467,6 +509,7 @@ impl Drop for ChildGuard {
     }
 }
 
+#[cfg(unix)]
 fn send_signal(child: &Child, sig: libc::c_int) {
     let pid = child.id() as libc::pid_t;
     if pid > 0 {
@@ -478,6 +521,10 @@ fn send_signal(child: &Child, sig: libc::c_int) {
 
 // ───────────────────────── helpers ──────────────────────────────────
 
+/// Fail with an install hint the user can act on. The hint is per-OS:
+/// this surfaces in the compare editor's export path on Windows too, where
+/// "sudo pacman -S ffmpeg" would be nonsense.
+#[cfg(unix)]
 pub(crate) fn require_tool(name: &str) -> Result<()> {
     if which(name).is_some() {
         Ok(())
@@ -486,17 +533,47 @@ pub(crate) fn require_tool(name: &str) -> Result<()> {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn require_tool(name: &str) -> Result<()> {
+    if which(name).is_some() {
+        Ok(())
+    } else {
+        bail!("`{name}` was not found on PATH. Install FFmpeg (winget install Gyan.FFmpeg) and reopen jot.")
+    }
+}
+
+/// Minimal `which`: first hit for `name` across `PATH`.
+///
+/// On Windows the executable extension is implicit in the command name —
+/// `ffmpeg` on disk is `ffmpeg.exe` — so we also probe every `PATHEXT`
+/// suffix the way cmd.exe does. Without that, a perfectly good FFmpeg
+/// install reads as missing and the compare editor's export dies.
 pub(crate) fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let exts: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_ascii_lowercase())
+        .collect();
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
         }
+        #[cfg(windows)]
+        for ext in &exts {
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
     }
     None
 }
 
+#[cfg(unix)]
 fn ensure_cache_dir() -> Result<PathBuf> {
     let dir = dirs::cache_dir()
         .ok_or_else(|| anyhow!("no XDG cache dir"))?
@@ -506,7 +583,9 @@ fn ensure_cache_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `~/Videos/gif/`. Created on first use. Honors `XDG_VIDEOS_DIR`.
+/// The GIF folder: `~/Videos/gif/` on Linux (honors `XDG_VIDEOS_DIR`),
+/// `%USERPROFILE%\Videos\gif` on Windows (the Videos known folder).
+/// Created on first use.
 pub fn ensure_gif_output_dir() -> Result<PathBuf> {
     let videos = dirs::video_dir()
         .or_else(|| dirs::home_dir().map(|h| h.join("Videos")))
@@ -522,6 +601,7 @@ pub(crate) fn file_timestamp() -> String {
 
 /// Spawn `wl-copy --type image/gif < gif`. Best-effort — failures only
 /// log, since the user can always Save As manually.
+#[cfg(unix)]
 pub fn copy_gif_to_clipboard(gif: &Path) -> Result<()> {
     if which("wl-copy").is_none() {
         bail!("wl-copy not installed (sudo pacman -S wl-clipboard)");
@@ -546,20 +626,41 @@ pub fn copy_gif_to_clipboard(gif: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Reveal the gif in the user's file manager / image viewer via
-/// `xdg-open`. Non-blocking.
+/// Put the GIF on the system clipboard — Windows.
+///
+/// GDK's clipboard only speaks `GdkTexture`, i.e. one decoded frame, and
+/// Windows has no CLI equivalent of wl-copy for animated GIFs. So this
+/// copies the FIRST FRAME as a still image, which is what most chat apps
+/// and docs actually want from a paste. Callers word their status text
+/// accordingly ("still frame") so nobody expects an animation.
+#[cfg(windows)]
+pub fn copy_gif_to_clipboard(gif: &Path) -> Result<()> {
+    use gtk::gdk::prelude::DisplayExt;
+
+    let texture = gtk::gdk::Texture::from_filename(gif)
+        .with_context(|| format!("decoding {}", gif.display()))?;
+    let display = gtk::gdk::Display::default().context("no display connection")?;
+    display.clipboard().set_texture(&texture);
+    Ok(())
+}
+
+/// Reveal the gif in the user's file manager / image viewer. Non-blocking.
+///
+/// Goes through GIO's default-handler machinery instead of spawning
+/// `xdg-open`: on Windows that resolves to the shell association
+/// (ShellExecute), on Linux it is the same desktop-file lookup xdg-open
+/// ends up doing, so one code path covers both.
 pub fn open_path(path: &Path) -> Result<()> {
-    Command::new("xdg-open")
-        .arg(path.as_os_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("xdg-open")?;
+    use gtk::gio::prelude::FileExt;
+
+    let uri = gtk::gio::File::for_path(path).uri();
+    gtk::gio::AppInfo::launch_default_for_uri(&uri, gtk::gio::AppLaunchContext::NONE)
+        .with_context(|| format!("opening {}", path.display()))?;
     Ok(())
 }
 
 /// Returns a human-readable list of any missing tools.
+#[cfg(unix)]
 pub fn missing_tools_summary() -> Option<String> {
     let missing: Vec<&str> = ["slurp", "wf-recorder", "ffmpeg"]
         .into_iter()
