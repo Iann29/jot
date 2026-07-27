@@ -453,7 +453,7 @@ TXT
 # 0xC0000135 (STATUS_DLL_NOT_FOUND). Needs no window station, so it also
 # works if you ever move this to a container.
 #
-SYS_ALLOW='^(advapi32|api-ms-win-.*|bcrypt|comctl32|comdlg32|crypt32|d3d11|d3d12|dbghelp|dcomp|dnsapi|dwmapi|dwrite|dxgi|gdi32|gdiplus|hid|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msimg32|msvcrt|ncrypt|netapi32|normaliz|ntdll|ole32|oleaut32|opengl32|pdh|powrprof|propsys|psapi|rpcrt4|secur32|setupapi|shell32|shlwapi|synchronization|user32|userenv|usp10|vcruntime140.*|version|vulkan-1|winhttp|wininet|winmm|winspool\.drv|ws2_32|wsock32|ucrtbase|dhcpcsvc|dsound|avrt|mmdevapi|ksuser|d2d1|windowscodecs|wtsapi32|uxtheme|cfgmgr32|bcryptprimitives|onecore.*|ext-ms-.*)$'
+SYS_ALLOW='^(advapi32|api-ms-win-.*|bcrypt|combase|comctl32|comdlg32|crypt32|d3d11|d3d12|dbghelp|dcomp|dnsapi|dwmapi|dwrite|dxgi|gdi32|gdiplus|hid|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msimg32|msvcrt|ncrypt|netapi32|normaliz|ntdll|ole32|oleaut32|opengl32|pdh|powrprof|propsys|psapi|rpcrt4|secur32|setupapi|shcore|shell32|shlwapi|synchronization|user32|userenv|usp10|vcruntime140.*|version|vulkan-1|winhttp|wininet|winmm|winspool\.drv|wldap32|ws2_32|wsock32|ucrtbase|dhcpcsvc|dsound|avrt|mmdevapi|ksuser|d2d1|windowscodecs|wtsapi32|uxtheme|cfgmgr32|bcryptprimitives|onecore.*|ext-ms-.*)$'
 echo "==> verifying the DLL closure is complete"
 _broken=0
 while IFS= read -r pe; do
