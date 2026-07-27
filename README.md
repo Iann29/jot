@@ -36,8 +36,8 @@ Single binary. ~5 MB of RAM at rest. Instant startup. One keystroke up, one keys
 
 ```bash
 sudo pacman -S --needed gtk4 libadwaita sqlite alsa-lib
-curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/download/v1.6.0/jot-v1.6.0-x86_64-linux.tar.gz
-tar -xzf jot.tar.gz && cd jot-v1.6.0-x86_64-linux && ./install.sh
+curl -L -o jot.tar.gz https://github.com/Iann29/jot/releases/download/v1.7.0/jot-v1.7.0-x86_64-linux.tar.gz
+tar -xzf jot.tar.gz && cd jot-v1.7.0-x86_64-linux && ./install.sh
 ```
 
 Drops `jot` into `~/.local/bin`, the desktop entry into `~/.local/share/applications`, the icon into `~/.local/share/icons/hicolor/scalable/apps`. Make sure `~/.local/bin` is on your `PATH`.
@@ -58,7 +58,7 @@ cd jot && ./scripts/install.sh
 
 ### Windows
 
-Grab `jot-vX.Y.Z-x86_64-windows.zip` from the [latest release](https://github.com/Iann29/jot/releases/latest), unzip it anywhere, and run `jot.exe`.
+Grab `jot-v1.7.0-x86_64-windows.zip` from the [latest release](https://github.com/Iann29/jot/releases/latest), unzip it anywhere, and run `jot.exe`.
 
 It's a **portable** build: the whole GTK4 + libadwaita runtime lives in that folder, nothing is installed and nothing is written to the registry. Deleting the folder removes the app; your notes stay put. Don't move `jot.exe` out of the folder — it resolves its DLLs, icon theme and GSettings schemas relative to itself.
 
