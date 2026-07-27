@@ -82,6 +82,10 @@ impl ThemeController {
         self.refresh();
     }
 
+    /// Windows keeps the stored value (so the config still round-trips) but
+    /// `refresh` ignores it — and window.rs hides the slider there, which can
+    /// leave this method with no caller on that target.
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn set_opacity(&self, opacity: f64) {
         self.opacity.set(opacity);
         self.refresh();
@@ -95,13 +99,40 @@ impl ThemeController {
         };
         let base = if dark { DARK_CSS } else { LIGHT_CSS };
         let bg = if dark { DARK_BG_HEX } else { LIGHT_BG_HEX };
-        let opacity = self.opacity.get().clamp(0.05, 1.0);
+        let requested = self.opacity.get().clamp(0.05, 1.0);
+        #[cfg(not(windows))]
+        let opacity = requested;
+        // GDK's win32 backend composites a translucent toplevel background as
+        // opaque BLACK under the default GL renderer, so any value below 1.0
+        // turns the window into a black rectangle rather than glass. Force
+        // opaque until per-pixel alpha is proven there; the settings slider is
+        // hidden on Windows to match, and the stored value is left untouched so
+        // the config still round-trips.
+        #[cfg(windows)]
+        let opacity = {
+            if requested < 1.0 {
+                tracing::debug!(
+                    "window opacity {requested:.2} ignored: no per-pixel alpha on win32"
+                );
+            }
+            1.0_f64
+        };
         // Append an override AFTER the base sheet so it wins on
         // last-rule-wins for `background-color`.
         let combined = format!(
             "{base}\n\
              /* opacity override (per-instance, regenerated on slider drag) */\n\
              window.jot-window {{ background-color: alpha({bg}, {opacity:.3}); }}\n"
+        );
+        // Same root cause as the opacity clamp: without an alpha channel the
+        // corner rounding is not clipped away, it is *painted* — leaving black
+        // wedges in all four corners. Square the window off and pin the
+        // background to the flat theme colour.
+        #[cfg(windows)]
+        let combined = format!(
+            "{combined}\
+             /* Windows: no per-pixel alpha on the win32 GDK backend */\n\
+             window.jot-window {{ border-radius: 0; background-color: {bg}; }}\n"
         );
         self.provider.load_from_string(&combined);
     }

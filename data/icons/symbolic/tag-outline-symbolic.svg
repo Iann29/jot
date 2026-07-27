@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  tag-outline-symbolic — jot's own icon for the tag picker / tag filter.
+
+  adwaita-icon-theme has no *tag* icon at all (checked through 50), so on a
+  self-contained Windows bundle GtkIconTheme would fall through to the
+  broken-image glyph without ever warning. Ship our own instead of renaming
+  the icon in the source.
+
+  Adwaita symbolic conventions, imitated deliberately: 16x16 viewBox, a
+  single <path>, no stroke, flat #2e3436 fill (GTK recolours symbolics by
+  overriding the fill, so the literal colour only matters outside GTK).
+  The three subpaths are outer outline / inner cut-out / eyelet dot, resolved
+  with fill-rule="evenodd" — the eyelet lands inside the cut-out, so the
+  even-odd count flips it back to filled, which is how outline tag icons
+  draw the hole (an actual hole would be invisible in an empty body).
+
+  Geometry: pentagon with a square corner at (1.5,1.5) and a flat 45° cap
+  between (14.5,8) and (8,14.5), mirrored about y=x. Ring is ~1.5px on the
+  axis-aligned edges, ~1.4px on the diagonals.
+-->
+<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
+    <path d="M 1.5 1.5 L 8 1.5 L 14.5 8 L 8 14.5 L 1.5 8 Z M 3 3 L 3 7.5 L 8 12.5 L 12.5 8 L 7.5 3 Z M 4.25 5.5 A 1.25 1.25 0 1 1 6.75 5.5 A 1.25 1.25 0 1 1 4.25 5.5 Z" fill="#2e3436" fill-rule="evenodd"/>
+</svg>

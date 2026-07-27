@@ -174,20 +174,62 @@ impl Db {
         Ok(())
     }
 
-    /// Returns every image path referenced by `![image](...)` in any note body.
-    /// Used by the orphan-image vacuum.
-    pub fn referenced_image_paths(&self) -> Result<HashSet<PathBuf>> {
+    /// Returns the vacuum key of every image referenced by `![image](...)` in
+    /// any note body — see [`image_key`] for what that key is and why it is
+    /// not the full path.
+    pub fn referenced_image_names(&self) -> Result<HashSet<String>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare("SELECT body FROM notes")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut refs = HashSet::new();
         for body in rows.flatten() {
             for path in extract_image_paths(&body) {
-                refs.insert(PathBuf::from(path));
+                if let Some(key) = image_key(&path) {
+                    refs.insert(key);
+                }
             }
         }
         Ok(refs)
     }
+
+    /// True if any body still carries the raw `![image](` marker. Used as the
+    /// orphan-vacuum's regression tripwire: marker present but zero keys
+    /// extracted means the parser (or the keying) broke — not that every
+    /// image genuinely went unreferenced.
+    pub fn any_body_has_image_marker(&self) -> Result<bool> {
+        let conn = self.inner.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT body FROM notes")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let found = rows.flatten().any(|b| b.contains(IMAGE_MARKER));
+        Ok(found)
+    }
+}
+
+/// Reduce an image reference to the identity the orphan vacuum compares on:
+/// the bare file name.
+///
+/// Bodies store an absolute path (`window::insert_image_at_cursor` writes
+/// `path.display()`), so comparing full paths breaks the moment the data
+/// directory moves — a `notes.db` carried over from the Linux build has
+/// `/home/<u>/.local/share/jot/images/<uuid>.png` in every body while the
+/// files on disk live under `%LOCALAPPDATA%\jot\images\`. Zero matches used to
+/// mean "delete every image". Both sides are one flat directory, so the file
+/// name alone is a sound (and separator-agnostic) identity.
+///
+/// We split on BOTH separators rather than going through `std::path` because
+/// the string may well have been written by the other OS. On Windows the key
+/// is lowercased: NTFS resolves names case-insensitively but `str` does not,
+/// and a case-only difference must never read as "orphan".
+pub(crate) fn image_key(reference: &str) -> Option<String> {
+    let name = reference
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())?;
+    #[cfg(windows)]
+    let name = name.to_ascii_lowercase();
+    #[cfg(not(windows))]
+    let name = name.to_string();
+    Some(name)
 }
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -210,15 +252,21 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The literal marker note bodies use for inline images. Shared between the
+/// parser below and the orphan-vacuum's regression tripwire in
+/// `maintenance.rs` — a guard that hardcoded its own copy would silently stop
+/// guarding the moment this string moved.
+pub(crate) const IMAGE_MARKER: &str = "![image](";
+
 /// Pull every `path` from `![image](path)` markdown patterns in `body`.
 fn extract_image_paths(body: &str) -> Vec<String> {
-    const PREFIX: &[u8] = b"![image](";
+    let prefix = IMAGE_MARKER.as_bytes();
     let bytes = body.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i..].starts_with(PREFIX) {
-            let after = i + PREFIX.len();
+        if bytes[i..].starts_with(prefix) {
+            let after = i + prefix.len();
             if let Some(rel) = bytes[after..].iter().position(|&b| b == b')') {
                 let end = after + rel;
                 out.push(body[after..end].to_string());
@@ -232,7 +280,17 @@ fn extract_image_paths(body: &str) -> Vec<String> {
 }
 
 pub fn data_dir() -> Result<PathBuf> {
-    let dir = dirs::data_dir().context("no XDG data dir")?.join("jot");
+    // Windows: %LOCALAPPDATA%, never %APPDATA%. The roaming profile is copied
+    // over SMB at logon/logoff on domain-joined boxes, and this directory holds
+    // a WAL-mode SQLite DB, every pasted image and 7 daily .db snapshots —
+    // slow logons at best, and WAL over SMB is a known corruption vector.
+    #[cfg(windows)]
+    let base = dirs::data_local_dir();
+    #[cfg(not(windows))]
+    let base = dirs::data_dir();
+    let dir = base
+        .context("could not determine data directory")?
+        .join("jot");
     Ok(dir)
 }
 
@@ -254,7 +312,7 @@ pub fn backups_dir() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_migrations, Db};
+    use super::{image_key, run_migrations, Db};
     use rusqlite::Connection;
 
     #[test]
@@ -292,5 +350,76 @@ mod tests {
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].tag, "work");
         assert_eq!(notes[0].color, "blue");
+    }
+
+    #[test]
+    fn image_key_ignores_the_directory_and_the_separator_flavour() {
+        // A body written by the Linux build and one written by the Windows
+        // build must reduce to the same key, whichever OS is running the
+        // vacuum — otherwise the sweep deletes the images it just failed to
+        // recognise.
+        let expected = image_key("shot.png");
+        assert!(expected.is_some());
+        assert_eq!(
+            image_key("/home/u/.local/share/jot/images/shot.png"),
+            expected
+        );
+        assert_eq!(
+            image_key(r"C:\Users\u\AppData\Local\jot\images\shot.png"),
+            expected
+        );
+        assert_eq!(image_key(""), None);
+        assert_eq!(image_key("images/"), None);
+    }
+
+    #[test]
+    fn referenced_image_names_collect_both_path_flavours() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let db = Db::from_connection(conn);
+
+        let note = db.create_note().unwrap();
+        db.update_note(
+            note.id,
+            "mixed",
+            "before ![image](/home/u/.local/share/jot/images/a.png) middle \
+             ![image](C:\\Users\\u\\AppData\\Local\\jot\\images\\b.png) after",
+        )
+        .unwrap();
+
+        let names = db.referenced_image_names().unwrap();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&image_key("a.png").unwrap()));
+        assert!(names.contains(&image_key("b.png").unwrap()));
+    }
+
+    #[test]
+    fn image_key_case_folds_only_on_windows() {
+        // NTFS resolves names case-insensitively, so a case-only difference
+        // must never read as "orphan" there; unix filesystems are case-
+        // sensitive, so the key must NOT fold.
+        #[cfg(windows)]
+        assert_eq!(image_key("SHOT.PNG").as_deref(), Some("shot.png"));
+        #[cfg(not(windows))]
+        assert_eq!(image_key("SHOT.PNG").as_deref(), Some("SHOT.PNG"));
+    }
+
+    #[test]
+    fn image_marker_tripwire_only_fires_when_bodies_carry_the_marker() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        let db = Db::from_connection(conn);
+
+        // Notes with no image marker at all: the vacuum must keep running
+        // (steady state — orphans still get reclaimed).
+        let note = db.create_note().unwrap();
+        db.update_note(note.id, "plain", "no images here").unwrap();
+        assert!(!db.any_body_has_image_marker().unwrap());
+
+        // Marker present: if the parser ever extracts zero keys from this,
+        // the tripwire must refuse the sweep.
+        db.update_note(note.id, "img", "look ![image](/tmp/x.png)")
+            .unwrap();
+        assert!(db.any_body_has_image_marker().unwrap());
     }
 }

@@ -91,9 +91,12 @@ impl Config {
     }
 }
 
-fn config_path() -> Result<PathBuf> {
+/// Where the settings live: `~/.config/jot/config.toml` on Linux,
+/// `%APPDATA%\jot\config.toml` on Windows. Public so the settings UI can
+/// show the real path instead of hardcoding the XDG one.
+pub fn config_path() -> Result<PathBuf> {
     Ok(dirs::config_dir()
-        .context("no XDG config dir")?
+        .context("could not determine config directory")?
         .join("jot")
         .join("config.toml"))
 }

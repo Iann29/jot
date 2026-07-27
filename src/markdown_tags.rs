@@ -292,8 +292,21 @@ fn find_close(chars: &[char], from: usize, delim: char) -> Option<usize> {
 fn find_close_pair(chars: &[char], from: usize, delim: char) -> Option<usize> {
     let mut k = from;
     while k + 1 < chars.len() {
-        if chars[k] == '\n' && chars.get(k + 1) == Some(&'\n') {
-            return None;
+        // A blank line ends the search — an unmatched `**` must not bold
+        // across a paragraph break. Windows text (pasted, or a dropped .md)
+        // writes that break as "\r\n\r\n", so the two newlines are NOT
+        // adjacent; step over the intervening '\r'. Without this the guard
+        // never fired on CRLF and a single stray `**` bolded the rest of the
+        // document.
+        if chars[k] == '\n' {
+            let next = if chars.get(k + 1) == Some(&'\r') {
+                k + 2
+            } else {
+                k + 1
+            };
+            if chars.get(next) == Some(&'\n') {
+                return None;
+            }
         }
         if chars[k] == delim && chars[k + 1] == delim {
             return Some(k);
@@ -468,5 +481,37 @@ pub fn reveal_markers_at_cursor(
         } else if !iter.forward_char() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_close_pair, scan, Kind};
+
+    #[test]
+    fn find_close_pair_stops_at_a_blank_line_in_either_line_ending() {
+        let lf: Vec<char> = "bold\n\ntext**".chars().collect();
+        assert_eq!(find_close_pair(&lf, 0, '*'), None);
+
+        let crlf: Vec<char> = "bold\r\n\r\ntext**".chars().collect();
+        assert_eq!(find_close_pair(&crlf, 0, '*'), None);
+
+        // A single CRLF is a soft wrap, not a paragraph break — still pairs.
+        let soft_wrap: Vec<char> = "bold\r\ntext**".chars().collect();
+        assert_eq!(find_close_pair(&soft_wrap, 0, '*'), Some(10));
+    }
+
+    #[test]
+    fn unmatched_bold_does_not_span_a_crlf_paragraph_break() {
+        // Before the CRLF fix this produced a Bold span covering the whole
+        // string, so pasting Windows text with one stray `**` bolded
+        // everything after it.
+        let spans = scan("**one\r\n\r\ntwo**");
+        assert!(!spans.iter().any(|s| matches!(s.kind, Kind::Bold)));
+
+        // Sanity check the other direction: a genuine pair inside one
+        // paragraph still renders.
+        let spans = scan("say **this** please");
+        assert!(spans.iter().any(|s| matches!(s.kind, Kind::Bold)));
     }
 }
