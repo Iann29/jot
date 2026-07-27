@@ -213,7 +213,7 @@ jobs:
           {
             rustc -vV
             cargo -V
-            pkgconf --modversion gtk4 libadwaita glib-2.0 gdk-pixbuf-2.0
+            pkgconf --modversion gtk4 libadwaita-1 glib-2.0 gdk-pixbuf-2.0
             pacman -Q mingw-w64-ucrt-x86_64-rust \
                       mingw-w64-ucrt-x86_64-gtk4 \
                       mingw-w64-ucrt-x86_64-libadwaita \
@@ -226,8 +226,8 @@ jobs:
           # libadwaita older than 1.5 compiles into undefined symbols.
           # (MSYS2 UCRT64 currently ships 1.9.x — this is belt-and-braces
           # against a repo rollback.)
-          pkgconf --atleast-version=1.5 libadwaita \
-            || { echo "::error::libadwaita $(pkgconf --modversion libadwaita) < 1.5 required by adw features=[v1_5]"; exit 1; }
+          pkgconf --atleast-version=1.5 libadwaita-1 \
+            || { echo "::error::libadwaita $(pkgconf --modversion libadwaita-1) < 1.5 required by adw features=[v1_5]"; exit 1; }
           pkgconf --atleast-version=4.14 gtk4 \
             || { echo "::error::gtk4 $(pkgconf --modversion gtk4) < 4.14 required by gtk4 features=[v4_14]"; exit 1; }
 
