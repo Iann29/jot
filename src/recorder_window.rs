@@ -81,20 +81,23 @@ impl RecorderOverlay {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title(RECORDER_TITLE)
-            .default_width(320)
-            .default_height(80)
             .resizable(false)
             .build();
         window.add_css_class("jot-recorder");
+        // GtkWindow hardcodes a 360x200 minimum for toplevels; an
+        // explicit size request is the only way to opt out of it, and
+        // without it the bar can never shrink below 200px tall.
+        window.set_size_request(1, 1);
 
         let red_dot = gtk::Label::builder().label("●").build();
         red_dot.add_css_class("jot-recorder-dot");
 
         let status_label = gtk::Label::builder()
-            .label("Recording")
+            .label("")
             .halign(gtk::Align::Start)
             .build();
         status_label.add_css_class("jot-recorder-status");
+        status_label.set_visible(false);
 
         let timer_label = gtk::Label::builder()
             .label("0:00")
@@ -105,9 +108,9 @@ impl RecorderOverlay {
         let spinner = gtk::Spinner::new();
         spinner.set_visible(false);
 
-        let left = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        left.set_margin_start(12);
-        left.set_margin_end(8);
+        let left = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        left.set_margin_start(8);
+        left.set_margin_end(6);
         left.set_valign(gtk::Align::Center);
         left.set_hexpand(true);
         left.append(&red_dot);
@@ -115,8 +118,10 @@ impl RecorderOverlay {
         left.append(&status_label);
         left.append(&timer_label);
 
-        let button_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        button_box.set_margin_end(10);
+        let button_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        button_box.set_margin_end(6);
+        button_box.set_margin_top(4);
+        button_box.set_margin_bottom(4);
         button_box.set_valign(gtk::Align::Center);
         button_box.set_halign(gtk::Align::End);
 
@@ -192,15 +197,11 @@ impl RecorderOverlay {
                 let kb = std::fs::metadata(&gif_path)
                     .map(|m| m.len() / 1024)
                     .unwrap_or(0);
-                self.status_label.set_text(&format!(
-                    "✓ {} · {}s · {} KB",
-                    gif_path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    seconds,
-                    kb
-                ));
+                // Keep the bar narrow: the filename would blow the
+                // width past 500px, so it lives in the tooltip.
+                self.status_label.set_text(&format!("{seconds}s · {kb} KB"));
+                self.status_label
+                    .set_tooltip_text(Some(&gif_path.to_string_lossy()));
                 self.timer_label.set_text("");
                 self.set_state(UiState::Done);
                 true
@@ -223,7 +224,8 @@ impl RecorderOverlay {
             UiState::Selecting => {
                 self.spinner.set_visible(false);
                 self.spinner.stop();
-                self.status_label.set_text("Selecting region…");
+                self.status_label.set_visible(false);
+                self.timer_label.set_visible(false);
                 self.window.remove_css_class("jot-recorder-converting");
                 self.window.remove_css_class("jot-recorder-done");
                 self.window.add_css_class("jot-recorder-recording");
@@ -231,7 +233,10 @@ impl RecorderOverlay {
             UiState::Recording => {
                 self.spinner.set_visible(false);
                 self.spinner.stop();
-                self.status_label.set_text("Recording");
+                // Pulsing red dot + running timer say "recording"
+                // without spending 70px on the word itself.
+                self.status_label.set_visible(false);
+                self.timer_label.set_visible(true);
                 self.window.remove_css_class("jot-recorder-converting");
                 self.window.remove_css_class("jot-recorder-done");
                 self.window.add_css_class("jot-recorder-recording");
@@ -239,7 +244,9 @@ impl RecorderOverlay {
             UiState::Converting => {
                 self.spinner.set_visible(true);
                 self.spinner.start();
-                self.status_label.set_text("Converting to GIF…");
+                self.status_label.set_text("Converting…");
+                self.status_label.set_visible(true);
+                self.timer_label.set_visible(false);
                 self.window.remove_css_class("jot-recorder-recording");
                 self.window.remove_css_class("jot-recorder-done");
                 self.window.add_css_class("jot-recorder-converting");
@@ -247,10 +254,11 @@ impl RecorderOverlay {
             UiState::Done => {
                 self.spinner.set_visible(false);
                 self.spinner.stop();
+                self.status_label.set_visible(true);
+                self.timer_label.set_visible(false);
                 self.window.remove_css_class("jot-recorder-recording");
                 self.window.remove_css_class("jot-recorder-converting");
                 self.window.add_css_class("jot-recorder-done");
-                self.window.set_default_size(560, 80);
                 self.window.present();
             }
         }
@@ -358,7 +366,7 @@ impl RecorderOverlay {
     fn on_rerecord(self: &Rc<Self>) {
         *self.handle.borrow_mut() = None;
         *self.last_gif.borrow_mut() = None;
-        self.window.set_default_size(320, 80);
+        self.status_label.set_tooltip_text(None);
         self.window.set_visible(false);
         self.start();
     }
@@ -521,9 +529,9 @@ fn pick_overlay_anchor(region: &str) -> Option<(i32, i32)> {
     let (mx, my, mw, mh) = monitor_geometry_for(rx + rw / 2, ry + rh / 2)?;
 
     // Overlay reserves enough room for the wider Done-state layout
-    // (Copy/Open/Re-record/Close).
-    const OVERLAY_W: i32 = 560;
-    const OVERLAY_H: i32 = 80;
+    // (status + Copy/Open/Re-record/Close).
+    const OVERLAY_W: i32 = 240;
+    const OVERLAY_H: i32 = 40;
     const MARGIN: i32 = 20;
 
     let candidates = [
@@ -549,15 +557,16 @@ fn pick_overlay_anchor(region: &str) -> Option<(i32, i32)> {
 
 // ─────────────────────── Placement picker ────────────────────────────
 //
-// One-time setup window: same shape as the recorder overlay, with a
-// label telling the user to drag it with Super+click and click OK
-// when it's where they want.
+// One-time setup window: a compact bar telling the user to drag it
+// with Super+click and click OK when it's where they want.
 //
 // Why bother with a separate picker instead of slurp -p:
 //   * Hyprland's native Super+drag for floating windows is muscle
 //     memory for the user; we don't introduce a new gesture.
-//   * The picker is rendered exactly like the real overlay, so the
-//     user sees the actual footprint before committing.
+//   * The picker is styled like the real overlay, so the user parks
+//     roughly the footprint they'll get. Widths differ a little
+//     between states, but what gets saved is the top-left corner —
+//     which is exactly what the overlay is anchored by.
 //   * Once placed, the absolute screen position is saved to config
 //     and reused on every subsequent recording — no re-positioning
 //     unless they hit Settings → Reset overlay position.
@@ -593,20 +602,22 @@ impl PlacementPicker {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title(PLACEMENT_TITLE)
-            .default_width(560)
-            .default_height(80)
             .resizable(false)
             .build();
         window.add_css_class("jot-recorder");
         window.add_css_class("jot-recorder-placement");
+        // Same GtkWindow 360x200 floor as the recorder overlay.
+        window.set_size_request(1, 1);
 
         let label = gtk::Label::builder()
-            .label("Drag me with Super+click, then OK")
+            .label("Super+drag")
             .halign(gtk::Align::Start)
             .hexpand(true)
+            .tooltip_text("Hold Super and drag this bar where you want it, then click OK")
             .build();
         label.add_css_class("jot-recorder-status");
-        label.set_margin_start(14);
+        label.set_margin_start(9);
+        label.set_margin_end(4);
 
         let ok = gtk::Button::builder()
             .label("OK")
@@ -619,8 +630,10 @@ impl PlacementPicker {
             .tooltip_text("Cancel")
             .build();
 
-        let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        bbox.set_margin_end(10);
+        let bbox = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        bbox.set_margin_end(6);
+        bbox.set_margin_top(4);
+        bbox.set_margin_bottom(4);
         bbox.set_valign(gtk::Align::Center);
         bbox.append(&ok);
         bbox.append(&cancel);

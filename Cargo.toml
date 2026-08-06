@@ -1,6 +1,6 @@
 [package]
 name = "jot"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 description = "Lightning-fast floating notes for Linux and Windows"
 license = "MIT"

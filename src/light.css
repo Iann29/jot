@@ -523,7 +523,7 @@ scrollbar slider:hover {
 window.jot-recorder {
     background: #ffffff;
     color: #1b1c22;
-    border-radius: 12px;
+    border-radius: 10px;
     border: 1px solid alpha(#000000, 0.10);
     box-shadow: 0 6px 28px alpha(#000000, 0.18);
 }
@@ -531,7 +531,7 @@ window.jot-recorder > contents { background: transparent; }
 
 .jot-recorder-dot {
     color: #e02050;
-    font-size: 16px;
+    font-size: 11px;
     animation: jot-mic-pulse 1.4s ease-in-out infinite;
 }
 .jot-recorder-converting .jot-recorder-dot { color: alpha(#d99a18, 0.6); animation: none; }
@@ -539,25 +539,26 @@ window.jot-recorder > contents { background: transparent; }
 
 .jot-recorder-status {
     font-weight: 600;
-    font-size: 13px;
+    font-size: 11px;
     color: #1b1c22;
 }
 .jot-recorder-timer {
     font-feature-settings: "tnum";
     color: alpha(#1b1c22, 0.55);
-    font-size: 12px;
-    margin-left: 6px;
+    font-size: 11px;
 }
 
 .jot-recorder button {
     background: alpha(#000000, 0.04);
     border: 1px solid alpha(#000000, 0.10);
-    border-radius: 8px;
+    border-radius: 6px;
     color: #1b1c22;
-    padding: 4px 6px;
-    min-height: 28px;
-    min-width: 28px;
+    padding: 0 4px;
+    min-height: 22px;
+    min-width: 22px;
+    font-size: 11px;
 }
+.jot-recorder button image { -gtk-icon-size: 13px; }
 .jot-recorder button:hover { background: alpha(#000000, 0.08); }
 .jot-recorder button.suggested-action {
     background: linear-gradient(180deg, #ef4060, #e02050);
@@ -568,6 +569,6 @@ window.jot-recorder > contents { background: transparent; }
 
 /* Placement-picker variant — visually distinct from the real overlay */
 window.jot-recorder.jot-recorder-placement {
-    border: 2px dashed alpha(#4a5cd1, 0.55);
+    border: 1px dashed alpha(#4a5cd1, 0.75);
     background: alpha(#ffffff, 0.95);
 }
